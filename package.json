@@ -1,0 +1,17 @@
+{
+  "name": "mcp-vision-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vision Bridge for LM Studio: feeds MCP tool-result images into the loaded model's vision input via a Generator plugin (loopback OpenAI-compatible API).",
+  "type": "module",
+  "scripts": {
+    "build": "npm --prefix vision-bridge run build",
+    "api:smoke": "node scripts/harness/api-smoke.mjs",
+    "phase1:text": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase1-text-test.mjs",
+    "phase1:sdkchat": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase1-sdkchat-test.mjs",
+    "phase1:messages": "node scripts/harness/message-normalize-test.mjs",
+    "phase1:vision": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase1-vision-test.mjs",
+    "phase2:detect": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase2-detect-test.mjs",
+    "phase3:bridge": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase3-bridge-test.mjs"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "type": "plugin",
+  "runner": "node",
+  "owner": "local",
+  "name": "vision-bridge"
+}
