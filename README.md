@@ -141,11 +141,11 @@ LM Studio APIから認識されているモデルを確認できます。
 
 ## 使い方
 まずはコマンドプロンプトで起動します。
-cd /d <ダウンロードしたフォルダ>\vision-bridge
+```cd /d <ダウンロードしたフォルダ>\vision-bridge```
 
 そのあとに
 
-lms dev
+```lms dev```
 
 設定が終われば、普段通りLM StudioからMCPを使うだけです。
 
