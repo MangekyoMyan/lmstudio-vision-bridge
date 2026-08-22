@@ -120,6 +120,32 @@ LM Studioの Plugins から `vision-bridge` フォルダをPluginとして追加
 
 `1234` の部分は、自分のLM Studio Local Serverのポートに合わせてください。
 
+これで動かない場合があります。原因は複雑なので修正はしません。
+その場合は直接
+MCP_qwen3.8\vision-bridge\src\config.ts
+
+この中の89行目にあります。
+
+model: getStr("model", "VISION_BRIDGE_MODEL", "qwen/qwen3.8-27b"),
+
+これを、
+
+model: getStr("model", "VISION_BRIDGE_MODEL", "Gemma 4 31Bの正確なモデルID"),
+
+に変更してください。
+
+たとえばLM Studio上のIDが仮に google/gemma-4-31b なら、
+
+model: getStr("model", "VISION_BRIDGE_MODEL", "google/gemma-4-31b"),
+
+です。モデルIDは推測せず、LM Studioに表示されている正確なIDを使ってください。
+
+ポートはその1個上の
+
+apiRoot: getStr("apiRoot", "VISION_BRIDGE_API_ROOT", "http://127.0.0.1:1238")
+
+です
+
 #### モデルIDが分からない場合
 
 リポジトリのルートで以下を実行します。
