@@ -27,7 +27,6 @@ interface SeenRecord {
 
 export class SeenTracker {
   private byHash = new Map<string, SeenRecord>();
-  private hashCache = new Map<string, string>();
   private stateFile: string | null;
 
   constructor(workingDirectory: string | null) {
@@ -65,17 +64,12 @@ export class SeenTracker {
   }
 
   contentHash(image: ResolvedImage): string {
-    const cacheKey = `${image.absPath}|${image.sizeBytes}`;
-    const cached = this.hashCache.get(cacheKey);
-    if (cached) return cached;
+    // Always hash the current file bytes. The previous cache keyed only on
+    // path+size, so an overwritten screenshot with different pixels but the
+    // exact same byte length could be mistaken for the old image forever.
+    // With max 8 images / 20 MB each, correctness is worth the tiny I/O cost.
     const buf = fs.readFileSync(image.absPath);
-    const hash = crypto.createHash("sha256").update(buf).digest("hex");
-    this.hashCache.set(cacheKey, hash);
-    if (this.hashCache.size > 200) {
-      const first = this.hashCache.keys().next().value;
-      if (first) this.hashCache.delete(first);
-    }
-    return hash;
+    return crypto.createHash("sha256").update(buf).digest("hex");
   }
 
   isSeen(hash: string): boolean {

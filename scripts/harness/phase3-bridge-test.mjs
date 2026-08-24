@@ -12,7 +12,8 @@
 //   3. a NEW image in a later tool result IS injected; the old one stays skipped
 //   4. text-only tool results leave the history unchanged
 //   5. multiple images -> ONE synthetic message with MULTIPLE image parts
-//   6. the input history array is never mutated (internal copy only)
+//   6. same path + same byte length + different content is NOT mistaken for a duplicate
+//   7. the input history array is never mutated (internal copy only)
 
 import fs from "node:fs";
 import os from "node:os";
@@ -142,6 +143,20 @@ const historyWithScene = () => [
   const parts = imgParts(synthetic(out));
   check(parts.length === 2, "5. synthetic message carries TWO image parts", `parts=${parts.length}`);
   check(out.injected.length === 2, "5. both images reported as injected", JSON.stringify(out.injected.map((i) => i.relativePath)));
+}
+
+// 6. overwrite same path with SAME BYTE LENGTH but different content ---------
+{
+  const wd6 = fs.mkdtempSync(path.join(os.tmpdir(), "vb-phase3-same-size-"));
+  const file = path.join(wd6, "same.png");
+  fs.writeFileSync(file, Buffer.from("AAAA"));
+  const seen4 = new SeenTracker(wd6);
+  const image = { absPath: file, relativePath: "same.png", mimeType: "image/png", sizeBytes: 4, matchedFrom: "test" };
+  const a = seen4.registerIfNew(image, "call_a");
+  fs.writeFileSync(file, Buffer.from("BBBB")); // same 4 bytes, different content
+  const b = seen4.registerIfNew(image, "call_b");
+  check(a.injected === true, "6. first same-size fixture is registered");
+  check(b.injected === true, "6. overwritten same-size file is re-hashed and treated as new content");
 }
 
 console.log(`\nworking directory: ${wd}`);

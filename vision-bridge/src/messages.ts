@@ -92,7 +92,7 @@ export function toOpenAIMessage(m: AnyMessage, index: number, baseDir?: string |
   const content = m?.content;
   const texts: string[] = [];
   const parts: OpenAIPart[] = [];
-  const allowImages = role !== "tool"; // SDK constraint: no images on tool messages
+  const allowImages = role === "user"; // OpenAI vision parts are valid only on user messages
 
   if (typeof content === "string") {
     if (content.length > 0) texts.push(content);
@@ -110,6 +110,17 @@ export function toOpenAIMessage(m: AnyMessage, index: number, baseDir?: string |
         continue;
       }
       if (allowImages) {
+        // Already-materialized OpenAI vision part. Previously this path was
+        // accidentally dropped because partImagePart() only looked for a
+        // top-level path/url and did not inspect image_url.url.
+        const iu = o.image_url;
+        if (iu && typeof iu === "object") {
+          const url = (iu as Record<string, unknown>).url;
+          if (typeof url === "string" && url.length > 0) {
+            parts.push({ type: "image_url", image_url: { url } });
+            continue;
+          }
+        }
         const img = partImagePart(o, baseDir);
         if (img) {
           parts.push(img);
@@ -128,12 +139,17 @@ export function toOpenAIMessage(m: AnyMessage, index: number, baseDir?: string |
     const t = partString(o, "text");
     if (t) texts.push(t);
     else if (allowImages) {
-      const img = partImagePart(o, baseDir);
-      if (img) parts.push(img);
+      const iu = o.image_url;
+      if (iu && typeof iu === "object" && typeof (iu as Record<string, unknown>).url === "string") {
+        parts.push({ type: "image_url", image_url: { url: (iu as Record<string, unknown>).url as string } });
+      } else {
+        const img = partImagePart(o, baseDir);
+        if (img) parts.push(img);
+      }
     }
   }
 
-  const out: OpenAIChatMessage = { role, content: null };
+  const out: OpenAIChatMessage = { role, content: "" };
   if (parts.length > 0) {
     out.content = texts.length > 0 ? [{ type: "text", text: texts.join("\n") }, ...parts] : parts;
   } else if (texts.length > 0) {
@@ -157,8 +173,6 @@ export function toOpenAIMessage(m: AnyMessage, index: number, baseDir?: string |
   // rejects with: "Messages from roles [user, system, tool] must contain a
   // 'content' field. Got 'object'." (Before this fix, user/system/assistant
   // messages without extractable text were sent with content:null.)
-  if (out.content === null) out.content = "";
-
   return out;
 }
 
@@ -256,7 +270,7 @@ export function normalizeOpenAIMessage(m: unknown, index: number): OpenAIChatMes
     dbg("msg", `message[${index}] content is ${String(content)}; normalizing to empty string`);
   }
 
-  const out: OpenAIChatMessage = { role };
+  const out: OpenAIChatMessage = { role, content: "" };
   if (role !== "user" && imageParts.length > 0) {
     dbg("msg", `message[${index}] (${role}) dropped ${imageParts.length} image part(s) — images are only allowed on user messages`);
   }

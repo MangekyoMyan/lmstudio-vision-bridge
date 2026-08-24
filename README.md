@@ -1,290 +1,273 @@
 # Vision Bridge for LM Studio
 
 > [!IMPORTANT]
-> AI Agent
-> このプロジェクトを修正する場合は、コードを触る前に `STATUS.md` と `AI_README.md` を読んでください。
+> AI Agent: このプロジェクトを修正する場合は、コードを触る前に `AI_STATUS.md` と `AI_README.md` を読んでください。
 
 LM Studioで、MCPツールが返した画像をVisionモデルへ自動で渡すためのGenerator Pluginです。
 
 > [!WARNING]
-> このツールは、LM Studioで
->
-> 「MCPから返された画像は保存されるが、Visionモデルの画像入力には渡されない」
->
-> という問題を回避するために作った暫定的なものです。
->
-> LM Studio本体でこの問題が修正された場合、このPluginは不要になる可能性があります。
+> LM Studio側で「MCP画像が保存されるが、モデルのVision入力には渡らない」という問題を回避するための暫定ツールです。LM Studio本体で同等機能が実装された場合、このBridgeは不要になる可能性があります。
 
-## 何ができる？
+## 何をするもの？
 
-たとえばBlender MCPでスクリーンショットを取得した場合、次の流れを自動化できます。
-
-Qwen
-↓
-Blender MCP
-↓
-スクリーンショット生成
-↓
+```text
+Model
+  ↓ tool call
+LM Studio → MCP (Blender等)
+  ↓
+スクリーンショット保存
+  ↓
 Vision Bridge
-↓
-QwenのVision入力
-↓
-画像を見て判断
+  ↓ image_url として内部履歴へ注入
+LM Studio Local API → Model Vision
+```
 
-これにより、
+MCPの実行はLM Studioに任せたままです。Vision Bridgeは「MCPの画像」と「モデルの目」をつなぐだけです。
 
-画面を見る
-↓
-MCPで操作する
-↓
-もう一度画面を見る
-↓
-修正する
+## GUI Control Panel
 
-といったループを、画像を手動で貼り付けずに行えます。
+長い推論で「まだ考えているのか、エラーで止まったのか」が分かりにくかったため、ローカルGUIを追加しています。
+
+表示できるもの:
+
+- `CONNECTING / CONNECTED / REASONING / GENERATING / TOOL CALL / ERROR` などの現在状態
+- 経過時間
+- Bridge heartbeat
+- 最後にモデル側のストリーム活動があった時刻
+- reasoning stream の**活動有無・イベント数**（思考本文は表示しません）
+- Visionへ投入した画像
+- Bridgeログ / `lms dev` ログ
+- 現在のモデル / API / timeout
+- GUIからの手動Abort
+- Seen-image（重複排除）状態のリセット
+- モデルID・APIポート等の設定
 
 > [!NOTE]
-> Vision Bridge自身がMCPを実行するわけではありません。
->
-> MCPの実行はこれまで通りLM Studioに任せ、Vision BridgeはMCPが返した画像とモデルのVision入力をつなぐだけです。
+> LM Studio/モデルが長考中に一切ストリームイベントを送らない場合、Bridge側から「モデル内部で正常に思考中」か「LM Studio内部で待機中」かを完全には判別できません。その場合でも、**Bridge processのheartbeatが生きているか / HTTP接続済みか / 最後のモデル活動はいつか**を分けて表示します。
 
 ## 必要なもの
 
-* Generator Pluginに対応したLM Studio
-* Vision入力に対応したモデル
-* 使用したいMCPサーバー
-* LM StudioのLocal API
+- Generator Pluginに対応したLM Studio
+- Vision入力に対応したモデル
+- 使用したいMCPサーバー
+- LM Studio Local Server
+- Node.js 20.6+
+- LM Studio CLI (`lms`)
 
-### 作者環境
+作者環境の既定値:
 
-| 項目        | 使用環境             |
-| --------- | ---------------- |
-| Model     | `Qwen3.8-27B`    |
-| MCP       | Blender MCP      |
-| Local API | `127.0.0.1:1238` |
+| 項目 | 既定値 |
+|---|---|
+| Model | `qwen/qwen3.8-27b` |
+| Local API | `http://127.0.0.1:1238` |
+| Absolute timeout | `0`（無効） |
 
-> [!NOTE]
-> 作者環境ではLM Studio Local APIのポートをデフォルトから変更しています。
->
-> 別ポートを使用している場合は設定を変更してください。
+## Windows クイックスタート
 
-別のVisionモデルや別ポートでも使用できます。
+### 1. 依存関係をインストール
 
-## インストール
+最初の1回だけ、`vision-bridge` フォルダで:
 
-### 1. 依存関係をインストールする
-
-GitHubからcloneした場合など、`node_modules` が存在しない場合は `vision-bridge` フォルダで実行します。
-
-```bash
+```cmd
 npm ci
 ```
 
-### 2. LM Studio側を準備する
+### 2. GUIから起動
 
-1. Vision対応モデルをロードする
-2. Local Serverを有効化する
-3. 使用するMCPを通常通り設定する
+リポジトリ直下の:
 
-### 3. Vision Bridgeを登録する
+```text
+start-vision-bridge-gui.cmd
+```
 
-LM Studioの Plugins から `vision-bridge` フォルダをPluginとして追加します。
+をダブルクリックします。
 
-その後、対象モデルのGeneratorとして `Vision Bridge` を選択してください。
+これで:
 
-## モデルとAPIの設定
+1. Vision Bridge Control Panelを `127.0.0.1:19280` で起動
+2. ブラウザでGUIを開く
+3. `vision-bridge` フォルダ内で `lms dev` を起動
 
-作者環境の既定値は以下です。
+まで行います。
 
-| 設定    | 既定値                     |
-| ----- | ----------------------- |
-| Model | `qwen/qwen3.8-27b`      |
-| API   | `http://127.0.0.1:1238` |
+GUIを閉じるだけではNodeプロセスが残る場合があります。起動したコンソールを閉じるか `Ctrl+C` で終了してください。
 
-環境が異なる場合は変更してください。
+### 手動起動
 
-### Windows
+```cmd
+cd /d <ダウンロードしたフォルダ>\vision-bridge
+npm run gui:dev
+```
 
-以下のファイルを作成します。
+GUIなしで従来通り使う場合:
 
-`C:\Users\<ユーザー名>\.vision-bridge\config.json`
+```cmd
+cd /d <ダウンロードしたフォルダ>\vision-bridge
+lms dev
+```
 
-内容：
+## LM Studio側
+
+1. Vision対応モデルをロード
+2. Local Serverを有効化
+3. 使用するMCPを通常通り有効化
+4. 対象チャットでGeneratorとして `Vision Bridge` を選択
+
+`lms dev` が動いている間、通常通りLM StudioからMCPを使います。
+
+## 設定
+
+一番簡単なのはGUIの **Settings** から変更する方法です。設定は:
+
+```text
+C:\Users\<ユーザー名>\.vision-bridge\config.json
+```
+
+へ保存されます。
+
+手書きする場合:
 
 ```json
 {
-  "apiRoot": "http://127.0.0.1:1234",
-  "model": "使用するモデルID"
+  "apiRoot": "http://127.0.0.1:1238",
+  "model": "qwen/qwen3.8-27b",
+  "timeoutMs": 0,
+  "bridgeEnabled": true,
+  "requoteOriginalRequest": true
 }
 ```
 
-`1234` の部分は、自分のLM Studio Local Serverのポートに合わせてください。
+設定の優先順位は:
 
-これで動かない場合があります。原因は複雑なので修正はしません。
-その場合は直接
-MCP_qwen3.8\vision-bridge\src\config.ts
-
-この中の89行目にあります。
-
-model: getStr("model", "VISION_BRIDGE_MODEL", "qwen/qwen3.8-27b"),
-
-これを、
-
-model: getStr("model", "VISION_BRIDGE_MODEL", "Gemma 4 31Bの正確なモデルID"),
-
-に変更してください。
-
-たとえばLM Studio上のIDが仮に google/gemma-4-31b なら、
-
-model: getStr("model", "VISION_BRIDGE_MODEL", "google/gemma-4-31b"),
-
-です。モデルIDは推測せず、LM Studioに表示されている正確なIDを使ってください。
-
-ポートはその1個上の
-
-apiRoot: getStr("apiRoot", "VISION_BRIDGE_API_ROOT", "http://127.0.0.1:1238")
-
-です
-
-#### モデルIDが分からない場合
-
-リポジトリのルートで以下を実行します。
-
-```bash
-npm run api:smoke
+```text
+環境変数
+> <working directory>/.vision-bridge/config.json
+> ~/.vision-bridge/config.json
+> 既定値
 ```
 
-LM Studio APIから認識されているモデルを確認できます。
+です。
 
-### macOS / Linux
+> [!NOTE]
+> 以前は実装上のマージ順が逆で、ユーザー側configがworking directory側を上書きしていました。現在は上記の優先順位どおりに修正済みです。
 
-以下に同じ内容の設定ファイルを作成してください。
+### Timeout
 
-`~/.vision-bridge/config.json`
+`timeoutMs`:
 
-> [!WARNING]
-> macOS / Linuxでの動作保証はありません。作者環境ではテストしていません。
+- `0` = absolute timeoutなし（既定）
+- `300000` = 5分
+- `600000` = 10分
 
-## 使い方
-まずはコマンドプロンプトで起動します。
-```cd /d <ダウンロードしたフォルダ>\vision-bridge```
+長考を正常に許容するため既定は無制限です。必要ならGUIの **Abort current request** でいつでも停止できます。
 
-そのあとに
+## GUIの状態表示
 
-```lms dev```
+主な状態:
 
-設定が終われば、普段通りLM StudioからMCPを使うだけです。
+| 状態 | 意味 |
+|---|---|
+| `PREPARING` | 履歴変換 / Vision画像検出中 |
+| `CONNECTING` | LM Studio Local APIへPOST中 |
+| `CONNECTED` | HTTP接続済み、モデルストリーム待ち |
+| `REASONING` | reasoning系ストリーム活動を検出 |
+| `GENERATING` | 通常テキストを生成中 |
+| `TOOL CALL` | tool callを生成/転送中 |
+| `COMPLETED` | 正常終了 |
+| `ABORTED` | GUI / LM Studio側から中断 |
+| `ERROR` | API/Bridgeエラー |
 
-コマンドプロンプトは消しちゃダメです。
+`Bridge heartbeat` が数秒以内で更新され続けているなら、少なくともVision BridgeのNode処理自体は生存しています。
 
-たとえばBlender MCPなら、次のように指示できます。
+## Vision画像の重複排除
 
-> 現在のBlender画面をスクリーンショットで確認してください。
-> 問題があれば修正し、修正後にもう一度スクリーンショットを取得して確認してください。
+画像内容のSHA-256で重複を判定します。
 
-処理は次のように進みます。
+- 同じファイル名でも内容が変われば再投入
+- 同じ内容ならスキップ
+- GUIの **Reset seen images** で現在のworking directoryの記録を消去可能
 
-MCP
-↓
-画像取得
-↓
-Vision入力
-↓
-判断
-↓
-MCP
-
-画像を手動でLM Studioへ添付する必要はありません。
+同一パス・同一ファイルサイズで中身だけ変化したケースでも誤判定しないよう、現在は毎回実ファイル内容をhashします。
 
 ## 対応する画像
 
-Vision Bridgeは、MCPツールが次の形式で画像を扱う場合を対象にしています。
+想定するMCP:
 
-1. 画像をLM Studioのworking directoryへ保存する
-2. tool result内にその画像への参照を返す
+1. 画像をLM Studioのworking directoryへ保存
+2. tool result内に画像ファイルへの参照を返す
 
-Blender MCPでは動作確認済みです。
+Blender MCPで動作確認済みです。
 
-> [!NOTE]
-> MCPが画像をファイルとして保存せず、インラインBase64だけを返す場合などは対象外です。
+MCPが画像をファイル化せず、インラインBase64だけをtool resultとして返すケースは現状の自動検出対象外です。
 
-## 制限
+| 項目 | 制限 |
+|---|---|
+| 1回の画像数 | 最大8画像 |
+| 1画像サイズ | 最大20MB |
+| 重複判定 | SHA-256 |
 
-| 項目      | 制限         |
-| ------- | ---------- |
-| 1回の画像数  | 最大8画像      |
-| 1画像のサイズ | 最大20MB     |
-| 重複判定    | SHA-256    |
-| 同名ファイル  | 内容が変われば再投入 |
+## セキュリティ
 
-同じ内容の画像はSHA-256で判定し、重複投入を防止します。
+Vision Bridgeはスクリーンショットをdata URL化して送信するため、API先は**loopback限定**です。
 
-ファイル名が同じでも画像内容が変化していれば、新しい画像として投入されます。
+許可:
+
+- `localhost`
+- `127.x.x.x`
+- `::1`
+
+誤設定で画像を外部APIへ送らないよう、非loopbackの `apiRoot` は拒否します。
+
+GUI自体も `127.0.0.1` のみにbindします。
 
 ## うまく動かない場合
 
 ### `model not found`
 
-設定した `model` と、LM StudioでロードしているモデルIDが一致しているか確認してください。
+GUIのModel IDとLM Studioでロード中の正確なモデルIDを一致させてください。
+
+モデル一覧確認:
+
+```cmd
+npm run api:smoke
+```
 
 ### APIへ接続できない
 
-LM StudioのLocal Serverが有効になっているか確認してください。
+LM Studio Local Serverが有効か、GUIのAPIポートが合っているか確認してください。
 
-また、`apiRoot` のポートが自分の環境と一致しているか確認してください。
+### 長時間止まって見える
 
-例：
+GUIで:
 
-```json
-{
-  "apiRoot": "http://127.0.0.1:1234"
-}
+- Bridge heartbeat
+- HTTP接続状態
+- Last model activity
+- reasoning activity
+- Bridge log
+
+を確認してください。
+
+heartbeatまで止まっていればBridge/Node側の停止を疑えます。heartbeatは動いているがmodel activityだけ長時間無ければ、LM Studio内部待機または無イベント長考の可能性があります。
+
+## 開発・テスト
+
+```cmd
+npm run build
+npm run phase2:detect
+npm run phase3:bridge
+npm run phase1:messages
+npm run phase1:text -- --mock
+npm run phase1:vision -- --mock
+npm run phase1:sdkchat
+npm run phase4:control
 ```
 
-### Pluginを登録できない
+`phase4:control` は、無制限timeout・reasoning activity検出・GUI型Abortの経路をモックAPIで検証します。
 
-Generator Pluginに対応したLM Studioが必要です。
+詳細:
 
-古いLM StudioではPlugin API自体が存在しないため動作しません。
-
-### MCPは動くが画像が見えていない
-
-working directory内の `.vision-bridge.log` を確認してください。
-
-主に次の情報が記録されます。
-
-* 画像の検出
-* Visionへの投入
-* 重複画像のスキップ
-* APIエラー
-
-## 詳細・開発資料
-
-このプロジェクトはローカルLLMを使いながら開発したため、内部にはAI向けの引き継ぎ資料も残っています。
-
-### `AI_README.md`
-
-開発時の詳細READMEです。
-
-内部構造やAI向け指示を含みます。
-
-### `AI_STATUS.md`
-
-実装状況、ファイル構成、不変条件などを記載しています。
-
-> [!WARNING]
-> 古いデータのため、すでに修正済みのバグも記載されています。
-
-### `TESTING.md`
-
-テスト方法とトラブルシューティングを記載しています。
-
-### `docs/architecture.md`
-
-Vision Bridgeの内部設計を記載しています。
-
-## 注意
-
-Vision BridgeはLM Studio本体の問題を迂回するために作った暫定的なBridgeです。
-
-LM Studioのアップデートによって、Plugin APIやMCP画像処理の仕様が変わった場合は動作しなくなる可能性があります。
+- `AI_STATUS.md`
+- `AI_README.md`
+- `TESTING.md`
+- `docs/architecture.md`

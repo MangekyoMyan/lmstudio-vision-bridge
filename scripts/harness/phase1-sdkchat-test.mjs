@@ -179,7 +179,9 @@ const lastReq = () => mock.state.last;
   const tc = report.reportedToolCalls[0];
   let argsOk = false;
   try {
-    argsOk = JSON.parse(tc?.arguments ?? "{}").x === 1;
+    const rawArgs = tc?.arguments ?? {};
+    const parsedArgs = typeof rawArgs === "string" ? JSON.parse(rawArgs || "{}") : rawArgs;
+    argsOk = parsedArgs && typeof parsedArgs === "object" && parsedArgs.x === 1;
   } catch {
     argsOk = false;
   }

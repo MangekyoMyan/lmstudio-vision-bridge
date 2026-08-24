@@ -3,6 +3,9 @@
  *
  * Priority: environment variables > <working directory>/.vision-bridge/config.json
  *          > ~/.vision-bridge/config.json > defaults.
+ *
+ * timeoutMs = 0 disables the absolute timeout. The optional GUI can still
+ * abort the active request manually.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -51,9 +54,13 @@ function toLevel(v: string): LogLevel {
 
 export function loadConfig(workingDirectory?: string | null): Config {
   const fileCfg: Record<string, unknown> = {};
+  // Merge LOW -> HIGH priority. The previous implementation accidentally
+  // merged working-directory config first and the user config second, which
+  // made ~/.vision-bridge/config.json override the project-local config even
+  // though the documented priority said the opposite.
   const candidates = [
-    workingDirectory ? path.join(workingDirectory, ".vision-bridge", "config.json") : null,
     path.join(os.homedir(), ".vision-bridge", "config.json"),
+    workingDirectory ? path.join(workingDirectory, ".vision-bridge", "config.json") : null,
   ].filter((p): p is string => typeof p === "string" && p.length > 0);
   for (const c of candidates) {
     const j = readJsonFile(c);
@@ -67,10 +74,15 @@ export function loadConfig(workingDirectory?: string | null): Config {
     if (fv !== undefined && fv !== null && String(fv) !== "") return String(fv);
     return fallback;
   };
-  const getNum = (key: string, envName: string, fallback: number): number => {
+  const getPositiveNum = (key: string, envName: string, fallback: number): number => {
     const raw = getStr(key, envName, String(fallback));
     const n = Number.parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  const getNonNegativeNum = (key: string, envName: string, fallback: number): number => {
+    const raw = getStr(key, envName, String(fallback));
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
   };
   const getBool = (key: string, envName: string, fallback: boolean): boolean => {
     const raw = getStr(key, envName, String(fallback));
@@ -87,8 +99,10 @@ export function loadConfig(workingDirectory?: string | null): Config {
     apiRoot: getStr("apiRoot", "VISION_BRIDGE_API_ROOT", "http://127.0.0.1:1238").replace(/\/+$/, ""),
     apiKey: getStr("apiKey", "VISION_BRIDGE_API_KEY", "lm-studio"),
     model: getStr("model", "VISION_BRIDGE_MODEL", "qwen/qwen3.8-27b"),
-    timeoutMs: getNum("timeoutMs", "VISION_BRIDGE_TIMEOUT_MS", 300000),
-    maxImageBytes: getNum("maxImageBytes", "VISION_BRIDGE_MAX_IMAGE_BYTES", 20 * 1024 * 1024),
+    // 0 = no absolute timeout. This avoids killing legitimate long reasoning
+    // runs; the GUI/runtime telemetry makes the wait observable and abortable.
+    timeoutMs: getNonNegativeNum("timeoutMs", "VISION_BRIDGE_TIMEOUT_MS", 0),
+    maxImageBytes: getPositiveNum("maxImageBytes", "VISION_BRIDGE_MAX_IMAGE_BYTES", 20 * 1024 * 1024),
     logLevel: toLevel(getStr("logLevel", "VISION_BRIDGE_LOG_LEVEL", "info")),
     logFile,
     bridgeEnabled: getBool("bridgeEnabled", "VISION_BRIDGE_ENABLED", true),

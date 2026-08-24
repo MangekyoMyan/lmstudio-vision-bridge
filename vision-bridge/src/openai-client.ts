@@ -1,12 +1,13 @@
 /**
  * Minimal OpenAI-compatible client for the loopback request
- * (Generator -> localhost LM Studio API -> loaded Qwen).
+ * (Generator -> localhost LM Studio API -> loaded model).
  *
- * - streaming (SSE) with line-based parsing (tolerates both \n\n framing and
- *   bare "data:" lines)
- * - non-stream JSON fallback
- * - explicit, diagnosable errors for the loopback failure modes
- *   (connect failure / 5xx / 202 queued / timeout)
+ * - streaming SSE + non-stream fallback
+ * - optional absolute timeout (timeoutMs=0 disables it)
+ * - external abort support (LM Studio cancellation / GUI Abort button)
+ * - lightweight activity telemetry; reasoning text is never surfaced or logged,
+ *   only the fact/size of reasoning activity is reported to the status UI
+ * - loopback-only guard so screenshots cannot be sent to a remote API by typo
  */
 import { dbg, err, info, warn } from "./log.js";
 import { describeMessageShape, normalizeOpenAIMessages, normalizeToolCallAny } from "./messages.js";
@@ -28,6 +29,16 @@ export interface ChatResult {
   viaStream: boolean;
 }
 
+export interface ChatStreamObserver {
+  onRequestStart?: (info: { url: string; at: number }) => void;
+  onConnected?: (info: { status: number; contentType: string; at: number }) => void;
+  onNetworkActivity?: (info: { at: number; bytes?: number }) => void;
+  onReasoningActivity?: (info: { at: number; chars: number }) => void;
+  onContentActivity?: (info: { at: number; chars: number }) => void;
+  onToolActivity?: (info: { at: number; fragments: number }) => void;
+  onComplete?: (info: { at: number; finishReason: string | null }) => void;
+}
+
 interface StreamState {
   content: string;
   finishReason: string | null;
@@ -37,7 +48,40 @@ interface StreamState {
   lmCalls: Array<Record<string, unknown>>;
 }
 
-function handleChunk(json: unknown, state: StreamState, onDelta: (t: string) => void, isWhole = false): void {
+function safeCall(fn: (() => void) | undefined): void {
+  if (!fn) return;
+  try { fn(); } catch { /* telemetry must never break generation */ }
+}
+
+function stringSize(v: unknown, depth = 0): number {
+  if (typeof v === "string") return v.length;
+  if (depth >= 2 || v === null || v === undefined) return 0;
+  if (Array.isArray(v)) return v.reduce((n, x) => n + stringSize(x, depth + 1), 0);
+  if (typeof v === "object") {
+    let n = 0;
+    for (const x of Object.values(v as Record<string, unknown>).slice(0, 20)) n += stringSize(x, depth + 1);
+    return n;
+  }
+  return 0;
+}
+
+function reasoningChars(holder: Record<string, unknown>): number {
+  // LM Studio/model backends have used a few different names. We intentionally
+  // count activity only; the actual chain-of-thought text is not exposed.
+  let n = 0;
+  for (const key of ["reasoning_content", "reasoning", "reasoning_text", "analysis"]) {
+    n += stringSize(holder[key]);
+  }
+  return n;
+}
+
+function handleChunk(
+  json: unknown,
+  state: StreamState,
+  onDelta: (t: string) => void,
+  observer?: ChatStreamObserver,
+  isWhole = false
+): void {
   if (!json || typeof json !== "object") return;
   const o = json as Record<string, unknown>;
   if (typeof o.model === "string") state.model = o.model;
@@ -48,12 +92,20 @@ function handleChunk(json: unknown, state: StreamState, onDelta: (t: string) => 
   const holder = (isWhole ? choice.message : choice.delta) as Record<string, unknown> | undefined;
   if (!holder || typeof holder !== "object") return;
 
-  if (typeof holder.content === "string" && holder.content.length > 0) {
-    if (state.firstTokenAt === null) state.firstTokenAt = Date.now();
-    state.content += holder.content;
-    if (!isWhole) onDelta(holder.content);
+  const rChars = reasoningChars(holder);
+  if (rChars > 0) {
+    safeCall(() => observer?.onReasoningActivity?.({ at: Date.now(), chars: rChars }));
   }
 
+  const contentDelta = typeof holder.content === "string" ? holder.content : "";
+  if (contentDelta.length > 0) {
+    if (state.firstTokenAt === null) state.firstTokenAt = Date.now();
+    state.content += contentDelta;
+    safeCall(() => observer?.onContentActivity?.({ at: Date.now(), chars: contentDelta.length }));
+    if (!isWhole) onDelta(contentDelta);
+  }
+
+  let toolFragments = 0;
   const tcd = holder.tool_calls;
   if (Array.isArray(tcd)) {
     for (const tc of tcd) {
@@ -68,12 +120,17 @@ function handleChunk(json: unknown, state: StreamState, onDelta: (t: string) => 
         if (typeof fn.arguments === "string") a.arguments += fn.arguments;
       }
       state.acc.set(idx, a);
+      toolFragments += 1;
     }
   }
 
   const lm = holder.toolCallRequest ?? (holder.tool !== undefined ? { tool: holder.tool, args: holder.args } : undefined);
   if (lm && typeof lm === "object" && typeof (lm as Record<string, unknown>).tool === "string") {
     state.lmCalls.push(lm as Record<string, unknown>);
+    toolFragments += 1;
+  }
+  if (toolFragments > 0) {
+    safeCall(() => observer?.onToolActivity?.({ at: Date.now(), fragments: toolFragments }));
   }
 }
 
@@ -94,24 +151,80 @@ function finishToolCalls(state: StreamState): OpenAIToolCall[] {
   return out;
 }
 
+function assertLoopbackApiRoot(apiRoot: string): void {
+  let url: URL;
+  try {
+    url = new URL(apiRoot);
+  } catch {
+    throw new BridgeError("api_bad_root", `Invalid apiRoot: ${apiRoot}`);
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const loopback = host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  if (!loopback) {
+    throw new BridgeError(
+      "api_non_loopback",
+      `Vision Bridge refuses non-loopback apiRoot "${apiRoot}". This tool may send screenshot image data; use localhost/127.0.0.1/::1 only.`
+    );
+  }
+}
+
+function makeAbortController(timeoutMs: number, externalSignal?: AbortSignal): {
+  signal: AbortSignal;
+  cleanup: () => void;
+  timedOut: () => boolean;
+} {
+  const ctl = new AbortController();
+  let timeout = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const onExternalAbort = (): void => {
+    if (!ctl.signal.aborted) ctl.abort(externalSignal?.reason ?? new Error("request aborted"));
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) onExternalAbort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+  if (timeoutMs > 0) {
+    timer = setTimeout(() => {
+      timeout = true;
+      if (!ctl.signal.aborted) ctl.abort(new Error(`absolute timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+  }
+  return {
+    signal: ctl.signal,
+    cleanup: () => {
+      if (timer) clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+    },
+    timedOut: () => timeout,
+  };
+}
+
+function abortBridgeError(url: string, timedOut: boolean, detail: string): BridgeError {
+  if (timedOut) {
+    return new BridgeError(
+      "api_timeout",
+      `Loopback request to ${url} exceeded the configured absolute timeout (${detail}). Set timeoutMs=0 to disable it.`
+    );
+  }
+  return new BridgeError("api_aborted", `Loopback request was aborted (${detail}).`);
+}
+
 export async function chatCompletionStream(
   cfg: { apiRoot: string; apiKey: string; timeoutMs: number },
   req: ChatRequest,
-  onDelta: (text: string) => void
+  onDelta: (text: string) => void,
+  options: { signal?: AbortSignal; observer?: ChatStreamObserver } = {}
 ): Promise<ChatResult> {
+  assertLoopbackApiRoot(cfg.apiRoot);
   const url = `${cfg.apiRoot.replace(/\/+$/, "")}/v1/chat/completions`;
 
-  // --- Pre-send diagnostic: exact content shape of every outgoing message --
-  // (base64 bodies redacted by the logger). Pinpoints which message carries
-  // content as object/null — the signature behind LM Studio's
-  // "messages ... must contain a 'content' field. Got 'object'" 400.
   const incoming = Array.isArray(req.messages) ? (req.messages as unknown[]) : [];
   info("api", "outgoing message shapes (pre-send)", {
     count: incoming.length,
     messages: incoming.map((m, i) => describeMessageShape(m, i)),
   });
 
-  // --- Enforce the official OpenAI message types (never null / raw object) -
   const normalized = normalizeOpenAIMessages(incoming);
   if (normalized.length !== incoming.length) {
     warn("api", "message count changed during normalization (invalid entries dropped)", {
@@ -128,124 +241,138 @@ export async function chatCompletionStream(
     messages: (req.messages as unknown[]).length,
     tools: req.tools?.length ?? 0,
     bodyBytes: body.length,
+    timeoutMs: cfg.timeoutMs,
   });
   const startedAt = Date.now();
+  safeCall(() => options.observer?.onRequestStart?.({ url, at: startedAt }));
 
+  const abort = makeAbortController(cfg.timeoutMs, options.signal);
   let res: Response;
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}),
-      },
-      body,
-      signal: AbortSignal.timeout(cfg.timeoutMs),
-    });
-  } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    const timedOut = e instanceof Error && (e.name === "TimeoutError" || /timeout/i.test(detail));
-    err("api", "connection to LM Studio API failed", { url, error: detail, timedOut });
-    throw new BridgeError(
-      timedOut ? "api_timeout" : "api_connect_failed",
-      `Cannot complete the loopback request to ${url} (${detail}). ` +
-        (timedOut
-          ? "The request hung — known loopback risk (LM Studio may queue the nested request behind the current one). See TESTING.md §Fallback."
-          : "Check that LM Studio is running with its local server enabled and apiRoot is correct.")
-    );
-  }
-
-  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-  dbg("api", "HTTP response received", { status: res.status, contentType, ms: Date.now() - startedAt });
-
-  if (res.status === 202) {
-    const text = await res.text().catch(() => "");
-    err("api", "request was queued (HTTP 202) — model busy; loopback deadlock risk", { body: text.slice(0, 500) });
-    throw new BridgeError(
-      "api_queued",
-      "LM Studio accepted the request as a background job (202). While the current turn holds the model this deadlocks — enable the fallback path (TESTING.md §Fallback)."
-    );
-  }
-
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    err("api", "non-OK response from LM Studio API", { status: res.status, body: text.slice(0, 1500) });
-    throw new BridgeError("api_error", `LM Studio API returned ${res.status}: ${text.slice(0, 400)}`);
-  }
-
-  const state: StreamState = {
-    content: "",
-    finishReason: null,
-    model: null,
-    firstTokenAt: null,
-    acc: new Map(),
-    lmCalls: [],
-  };
-
-  if (contentType.includes("text/event-stream")) {
-    let buffer = "";
-    const processLine = (line: string): void => {
-      const l = line.replace(/\r$/, "");
-      if (!l.startsWith("data:")) return;
-      const payload = l.slice(5).trim();
-      if (!payload || payload === "[DONE]") return;
-      let json: unknown;
-      try {
-        json = JSON.parse(payload);
-      } catch {
-        dbg("api", "unparseable SSE data line", payload.slice(0, 200));
-        return;
-      }
-      handleChunk(json, state, onDelta);
-    };
-    const stream = res.body as unknown as { getReader: () => ReadableStreamDefaultReader<Uint8Array> };
-    const reader = stream.getReader();
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value && value.length > 0) {
-          buffer += Buffer.from(value).toString("utf8");
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          for (const line of lines) processLine(line);
-        }
-      }
-    } finally {
-      reader.releaseLock?.();
-    }
-    if (buffer.trim().length > 0) processLine(buffer);
-  } else {
-    const text = await res.text();
-    let json: unknown;
-    try {
-      json = JSON.parse(text);
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}),
+        },
+        body,
+        signal: abort.signal,
+      });
     } catch (e) {
-      throw new BridgeError("api_bad_json", `non-stream response was not valid JSON: ${(e as Error).message}`);
+      const detail = e instanceof Error ? e.message : String(e);
+      if (abort.signal.aborted) throw abortBridgeError(url, abort.timedOut(), detail);
+      err("api", "connection to LM Studio API failed", { url, error: detail });
+      throw new BridgeError(
+        "api_connect_failed",
+        `Cannot connect to ${url} (${detail}). Check that LM Studio Local Server is enabled and apiRoot is correct.`
+      );
     }
-    handleChunk(json, state, onDelta, true);
-    if (state.content.length > 0) onDelta(state.content);
-  }
 
-  const toolCalls = finishToolCalls(state);
-  info("api", "loopback request complete", {
-    viaStream: contentType.includes("text/event-stream"),
-    contentChars: state.content.length,
-    toolCalls: toolCalls.length,
-    model: state.model,
-    finishReason: state.finishReason,
-    firstTokenMs: state.firstTokenAt === null ? null : state.firstTokenAt - startedAt,
-    totalMs: Date.now() - startedAt,
-  });
-  if (toolCalls.length > 0) {
-    info("api", "model requested tool call(s)", toolCalls.map((t) => t.function.name));
-  }
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+    dbg("api", "HTTP response received", { status: res.status, contentType, ms: Date.now() - startedAt });
+    safeCall(() => options.observer?.onConnected?.({ status: res.status, contentType, at: Date.now() }));
 
-  return {
-    content: state.content,
-    toolCalls,
-    model: state.model,
-    finishReason: state.finishReason,
-    viaStream: contentType.includes("text/event-stream"),
-  };
+    if (res.status === 202) {
+      const text = await res.text().catch(() => "");
+      err("api", "request was queued (HTTP 202) — model busy; loopback deadlock risk", { body: text.slice(0, 500) });
+      throw new BridgeError(
+        "api_queued",
+        "LM Studio accepted the request as a background job (202). The nested loopback request may be queued behind the current prediction."
+      );
+    }
+
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      err("api", "non-OK response from LM Studio API", { status: res.status, body: text.slice(0, 1500) });
+      throw new BridgeError("api_error", `LM Studio API returned ${res.status}: ${text.slice(0, 400)}`);
+    }
+
+    const state: StreamState = {
+      content: "",
+      finishReason: null,
+      model: null,
+      firstTokenAt: null,
+      acc: new Map(),
+      lmCalls: [],
+    };
+
+    try {
+      if (contentType.includes("text/event-stream")) {
+        let buffer = "";
+        const processLine = (line: string): void => {
+          const l = line.replace(/\r$/, "");
+          if (!l.startsWith("data:")) return;
+          const payload = l.slice(5).trim();
+          if (!payload || payload === "[DONE]") return;
+          let json: unknown;
+          try {
+            json = JSON.parse(payload);
+          } catch {
+            dbg("api", "unparseable SSE data line", payload.slice(0, 200));
+            return;
+          }
+          handleChunk(json, state, onDelta, options.observer);
+        };
+        const stream = res.body as unknown as { getReader: () => ReadableStreamDefaultReader<Uint8Array> };
+        const reader = stream.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.length > 0) {
+              safeCall(() => options.observer?.onNetworkActivity?.({ at: Date.now(), bytes: value.length }));
+              buffer += Buffer.from(value).toString("utf8");
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+              for (const line of lines) processLine(line);
+            }
+          }
+        } finally {
+          reader.releaseLock?.();
+        }
+        if (buffer.trim().length > 0) processLine(buffer);
+      } else {
+        const text = await res.text();
+        safeCall(() => options.observer?.onNetworkActivity?.({ at: Date.now(), bytes: Buffer.byteLength(text) }));
+        let json: unknown;
+        try {
+          json = JSON.parse(text);
+        } catch (e) {
+          throw new BridgeError("api_bad_json", `non-stream response was not valid JSON: ${(e as Error).message}`);
+        }
+        handleChunk(json, state, onDelta, options.observer, true);
+        if (state.content.length > 0) onDelta(state.content);
+      }
+    } catch (e) {
+      if (abort.signal.aborted) {
+        const detail = e instanceof Error ? e.message : String(e);
+        throw abortBridgeError(url, abort.timedOut(), detail);
+      }
+      throw e;
+    }
+
+    const toolCalls = finishToolCalls(state);
+    info("api", "loopback request complete", {
+      viaStream: contentType.includes("text/event-stream"),
+      contentChars: state.content.length,
+      toolCalls: toolCalls.length,
+      model: state.model,
+      finishReason: state.finishReason,
+      firstTokenMs: state.firstTokenAt === null ? null : state.firstTokenAt - startedAt,
+      totalMs: Date.now() - startedAt,
+    });
+    if (toolCalls.length > 0) info("api", "model requested tool call(s)", toolCalls.map((t) => t.function.name));
+    safeCall(() => options.observer?.onComplete?.({ at: Date.now(), finishReason: state.finishReason }));
+
+    return {
+      content: state.content,
+      toolCalls,
+      model: state.model,
+      finishReason: state.finishReason,
+      viaStream: contentType.includes("text/event-stream"),
+    };
+  } finally {
+    abort.cleanup();
+  }
 }

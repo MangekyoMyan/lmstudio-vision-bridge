@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
-    "dev": "lms dev"
+    "dev": "lms dev",
+    "gui": "node gui/server.mjs",
+    "gui:dev": "node gui/server.mjs --with-lms-dev"
   },
   "dependencies": {
     "@lmstudio/sdk": "1.4.0"

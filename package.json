@@ -12,6 +12,10 @@
     "phase1:messages": "node scripts/harness/message-normalize-test.mjs",
     "phase1:vision": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase1-vision-test.mjs",
     "phase2:detect": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase2-detect-test.mjs",
-    "phase3:bridge": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase3-bridge-test.mjs"
+    "phase3:bridge": "node --import ./scripts/harness/register-mock.mjs scripts/harness/phase3-bridge-test.mjs",
+    "gui": "node vision-bridge/gui/server.mjs",
+    "gui:dev": "node vision-bridge/gui/server.mjs --with-lms-dev",
+    "phase4:control": "node scripts/harness/phase4-control-test.mjs",
+    "phase0:config": "node scripts/harness/config-priority-test.mjs"
   }
 }

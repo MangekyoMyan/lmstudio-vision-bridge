@@ -1,6 +1,6 @@
 # LM Studio × Qwen3.8-27B : MCP画像 → Vision入力「Vision Bridge」
 
-> 📌 **まず [STATUS.md](STATUS.md) を読むこと** — 現在の進捗・ファイルマップ（各ファイルの职责）・
+> 📌 **まず [AI_STATUS.md](AI_STATUS.md) を読むこと** — 現在の進捗・ファイルマップ（各ファイルの职责）・
 > 不変条件・バグ修正履歴が詰まっている。コードを全部読み直す必要はない。
 >
 > ⚠️ **別の環境で使う／第三者に渡す場合は、必ず
@@ -55,7 +55,7 @@ LM Studioでは、MCPツール(Blender MCPなど)が返した画像が **working
 ```
 MCP_qwen3.8/
 ├── README.md                  ← 本書
-├── STATUS.md                  ← 進捗・ファイルマップ・不変条件
+├── AI_STATUS.md                  ← 進捗・ファイルマップ・不変条件
 ├── TESTING.md                 ← Phase別のテスト手順・診断表
 ├── package.json               ← 便利スクリプト集(npm run phase1:text 等)
 ├── docs/
@@ -72,6 +72,7 @@ MCP_qwen3.8/
 │   │   ├── generator.ts       ← 旧beta APIのVisionBridgeGenerator(ハーネストest用)
 │   │   └── (config / dedup / image-detect / log / messages /
 │   │        openai-client / types / vision-bridge / controller)
+│   ├── gui/                   ← ローカルGUI Control Panel (Node標準機能のみ)
 │   ├── build/                 ← tsc出力(build/index.js + build/src/*.js)
 │   │                            ★ハーネストestの実行対象＝src/と同期が必要
 │   ├── .lmstudio/
@@ -187,7 +188,7 @@ npm run phase1:text -- --mock   # パイプラインの疎通確認(モデル不
 | `apiRoot` / `VISION_BRIDGE_API_ROOT` | `http://127.0.0.1:1238` | 折返し先APIのルート |
 | `apiKey` / `VISION_BRIDGE_API_KEY` | `lm-studio` | Bearer認証 |
 | `model` / `VISION_BRIDGE_MODEL` | `qwen/qwen3.8-27b` | 推論モデルID(既定値は作者環境用。別環境では要変更) |
-| `timeoutMs` / `VISION_BRIDGE_TIMEOUT_MS` | `300000` | 1リクエストのタイムアウト |
+| `timeoutMs` / `VISION_BRIDGE_TIMEOUT_MS` | `0` | absolute timeout。`0`で無効。GUIから手動Abort可能 |
 | `maxImageBytes` / `VISION_BRIDGE_MAX_IMAGE_BYTES` | `20971520` (20MB) | これより大きい画像はVision投入しない(エラーログ) |
 | `logLevel` / `VISION_BRIDGE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
 | `logFile` / `VISION_BRIDGE_LOG_FILE` | `<working directory>/.vision-bridge.log` | ログ先 |
@@ -240,18 +241,19 @@ npm run phase3:bridge
 # Phase 4: Blender MCP実機E2E(詳細はTESTING.md §Phase 4)
 ```
 
-## 第三者への引き渡し
+## 第三者への引き渡し / GitHub
 
-- **フォルダごとzip等で渡すこと**（`node_modules/` と `.lmstudio/` を含める）。
-  - `git` 経由で渡すと `.gitignore` が `node_modules/` と `.lmstudio/`（hostブートストラップ）を除外するため、
-    相手の環境でプラグインが読み込めない／ハーネスが走れない状態になります。
-- 受け取る側には README の「**モデル名・API先を変える場所**」を読むよう伝えてください
+- GitHubからclone / Download ZIPしたソースをそのまま配布元として使えます。
+- `node_modules/` と `.lmstudio/` は生成物なのでGitには含めません。
+  - 初回に `vision-bridge` で `npm ci` を実行して依存関係を復元します。
+  - `lms dev` はLM Studio CLI側で必要な開発用ブートストラップを生成・利用します。
+- 受け取る側には README の「**設定**」を読み、自分のロード済みモデルIDとLocal APIポートを確認するよう伝えてください。
   （自分のロード済みモデルIDとサーバーポートを `config.json` や環境変数で設定する）。
 - LM Studioはプラグイン機能のある**同じ世代のバージョン**が必要（古いバージョンではAPI自体が存在しない）。
 - 本プロジェクトの独自コードには LICENSE ファイルを付けていません。
   第三者への利用許諾は、譲渡時の合意（口頭でも可）に基づきます。
   同梱の依存パッケージ（`@lmstudio/sdk` 等）は各自のライセンス（Apache-2.0 等）に従います。
-- セキュリティ面: ネットワーク通信はすべて `127.0.0.1` へのループバックのみ。
+- セキュリティ面: 推論APIは loopback (`localhost` / `127.x.x.x` / `::1`) のみ許可。GUIも `127.0.0.1` のみにbind。
   外部送信・UI自動操作・MCPクライアント実装は行いません（詳細は `docs/architecture.md`）。
 
 ## 最大の未確認事項とフォールバック
@@ -267,7 +269,7 @@ npm run phase3:bridge
 | `api_connect_failed` | API未起動/ポート違い | LM Studioのサーバー有効化・`apiRoot`確認 |
 | `api_error ... model not found` 等 | `model`設定がロード済みモデルと不一致 | `model` をロード済みモデルIDに変更(上記「モデル名・API先を変える場所」) |
 | `api_error 503 ...` / `api_queued (202)` | 現行ターンがモデルを占有し、内部リクエストがキューでブロック | フォールバック: `proxy/fallback-proxy.mjs` + `apiRoot`差し替え |
-| `api_timeout` | 同上の無応答版(デッドロック) | 同上 |
+| `api_timeout` | `timeoutMs > 0` のとき設定時間を超過 | timeoutを延長/0で無効化。GUIで状態確認・手動Abort |
 | `no tool-call reporting method found` | hostのSDKメソッド名が想定と違う | ログの `availableKeys` を見て `src/controller.ts` の `REPORT_METHODS` を追加 |
 
 フォールバックの設計思想: **MCP実行は常にLM Studio側に残す**。

@@ -41,10 +41,11 @@ import { loadConfig } from "./config.js";
 import { configure as configureLog, dbg, err, info, warn } from "./log.js";
 import { SeenTracker } from "./dedup.js";
 import { applyVisionBridge } from "./vision-bridge.js";
-import { chatCompletionStream, type ChatRequest } from "./openai-client.js";
+import { chatCompletionStream, type ChatRequest, type ChatStreamObserver } from "./openai-client.js";
 import { toOpenAITools } from "./messages.js";
 import { getControllerTools, getWorkingDirectory, reportToolCall } from "./controller.js";
 import type { AnyController, AnyMessage, OpenAIToolCall } from "./types.js";
+import { beginRuntime, patchRuntime, startAbortWatcher, startRuntimeHeartbeat } from "./runtime-state.js";
 
 /**
  * Permissive structural view of the current host GeneratorController
@@ -159,7 +160,14 @@ function sdkChatMessages(chat: unknown): unknown[] {
   const it = (chat as unknown as { [Symbol.iterator]?: () => Iterator<unknown> })[Symbol.iterator];
   if (typeof it === "function") {
     try {
-      return Array.from(it.call(chat));
+      const iterator = it.call(chat);
+      const out: unknown[] = [];
+      for (;;) {
+        const next = iterator.next();
+        if (next.done) break;
+        out.push(next.value);
+      }
+      return out;
     } catch {
       /* fall through */
     }
@@ -291,10 +299,6 @@ export async function generate(ctl: unknown, chat: unknown): Promise<void> {
   const seen = new SeenTracker(wd);
 
   // --- Resolve the incoming history into plain messages ---------------------
-  // Current host: `chat` is the @lmstudio/sdk Chat CLASS (Generator =
-  // (ctl, history: Chat) => Promise) — NOT a plain array. Older/harness
-  // shapes: a plain array or a {messages: [...]} wrapper. All shapes are
-  // normalized to the plain format the rest of the pipeline understands.
   let messages: AnyMessage[];
   let historyShape: string;
   if (isSdkChat(chat)) {
@@ -309,126 +313,212 @@ export async function generate(ctl: unknown, chat: unknown): Promise<void> {
   } else {
     historyShape = chat === null ? "null" : typeof chat;
     if (chat && typeof chat === "object") {
-      warn("gen", "unrecognized chat shape; treating history as empty", {
-        keys: Object.keys(chat).slice(0, 20),
-      });
+      warn("gen", "unrecognized chat shape; treating history as empty", { keys: Object.keys(chat).slice(0, 20) });
     }
     messages = [];
   }
 
+  const invocationId = `vb-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  beginRuntime({
+    invocationId,
+    phase: "preparing",
+    startedAt: Date.now(),
+    model: cfg.model,
+    apiRoot: cfg.apiRoot,
+    timeoutMs: cfg.timeoutMs,
+    workingDirectory: wd,
+    logFile: cfg.logFile,
+    messageCount: messages.length,
+    toolCount: 0,
+    injectedImages: [],
+    skippedImages: 0,
+    note: "Preparing outgoing history.",
+  });
+  const stopHeartbeat = startRuntimeHeartbeat(invocationId);
+
+  // One controller links three cancellation sources: GUI Abort, LM Studio's
+  // own abort signal (when exposed), and the optional absolute timeout inside
+  // openai-client.ts.
+  const requestAbort = new AbortController();
+  const hostSignal = (ctlAny as Record<string, unknown>).abortSignal;
+  const onHostAbort = (): void => {
+    if (!requestAbort.signal.aborted) requestAbort.abort(new Error("LM Studio aborted the prediction"));
+  };
+  if (hostSignal && typeof hostSignal === "object" && "aborted" in hostSignal && "addEventListener" in hostSignal) {
+    const hs = hostSignal as AbortSignal;
+    if (hs.aborted) onHostAbort();
+    else hs.addEventListener("abort", onHostAbort, { once: true });
+  }
+  const stopAbortWatcher = startAbortWatcher(invocationId, () => {
+    patchRuntime(invocationId, { note: "Abort requested from Vision Bridge GUI." });
+    if (!requestAbort.signal.aborted) requestAbort.abort(new Error("aborted from Vision Bridge GUI"));
+  });
+
   info("gen", "generate() invoked by LM Studio", {
+    invocationId,
     messages: messages.length,
     roles: messages.slice(0, 32).map((m) => (m && typeof m.role === "string" ? m.role : "?")).join(","),
     historyShape,
     workingDirectory: wd,
     apiRoot: cfg.apiRoot,
     model: cfg.model,
+    timeoutMs: cfg.timeoutMs,
     seenImages: seen.size,
   });
 
-  // --- Guard: truly empty history -> do NOT POST empty messages (API 400) ---
-  if (messages.length === 0) {
-    err("gen", "empty chat history received — refusing to POST empty messages (API would 400)", {
-      historyShape,
-    });
-    const newCtl = ctlAny as NewGeneratorController;
-    if (typeof newCtl.fragmentGenerated === "function") {
-      try {
-        newCtl.fragmentGenerated(
-          "⚠️ Vision Bridge: LM Studio passed an empty conversation history; nothing to generate. Send a message and try again."
-        );
-      } catch {
-        /* host may already be gone */
-      }
-    }
-    return;
-  }
-
-  // --- Phase 2/3 on an INTERNAL copy (never mutates the LM Studio history) ---
-  const bridge = applyVisionBridge({ ctl: ctlAny, messages, cfg, seen });
-  dbg("gen", "outgoing chat prepared", {
-    outgoingMessages: bridge.messages.length,
-    injectedImages: bridge.injected.map((i) => i.relativePath),
-    skippedDuplicates: bridge.skippedDuplicates,
-  });
-
-  // --- tool definitions: probe the controller (covers getToolDefinitions) ---
-  const tools = toOpenAITools(getControllerTools(ctlAny));
-  if (tools) {
-    dbg("gen", "forwarding tool definitions to model", {
-      count: tools.length,
-      names: tools.map((t) => t.function.name),
-    });
-  } else {
-    warn("gen", "no tool definitions found on the controller — model cannot issue MCP tool calls this round");
-  }
-
-  const req: ChatRequest = { model: cfg.model, messages: bridge.messages, stream: true };
-  if (tools && tools.length > 0) req.tools = tools;
-
-  // --- stream text deltas back to LM Studio ---
-  const newCtl = ctlAny as NewGeneratorController;
-  const emit = (t: string): void => {
-    if (typeof newCtl.fragmentGenerated === "function") {
-      try {
-        newCtl.fragmentGenerated(t);
-      } catch (e) {
-        dbg("gen", "fragmentGenerated threw (host may have cancelled); continuing loopback drain", String(e));
-      }
-    }
-  };
-
-  let result: Awaited<ReturnType<typeof chatCompletionStream>>;
   try {
-    result = await chatCompletionStream(
-      { apiRoot: cfg.apiRoot, apiKey: cfg.apiKey, timeoutMs: cfg.timeoutMs },
-      req,
-      emit
-    );
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    err("gen", "loopback request failed", msg);
-    emit(`⚠️ Vision Bridge: ${msg}`);
-    return;
-  }
+    if (messages.length === 0) {
+      err("gen", "empty chat history received — refusing to POST empty messages (API would 400)", { historyShape });
+      patchRuntime(invocationId, { phase: "error", error: "LM Studio passed an empty conversation history." });
+      const newCtl = ctlAny as NewGeneratorController;
+      if (typeof newCtl.fragmentGenerated === "function") {
+        try {
+          newCtl.fragmentGenerated(
+            "⚠️ Vision Bridge: LM Studio passed an empty conversation history; nothing to generate. Send a message and try again."
+          );
+        } catch { /* host may already be gone */ }
+      }
+      return;
+    }
 
-  info("gen", "model output received", {
-    contentChars: result.content.length,
-    toolCalls: result.toolCalls.length,
-    model: result.model,
-    finishReason: result.finishReason,
-    viaStream: result.viaStream,
-  });
+    // --- Phase 2/3 on an INTERNAL copy (never mutates LM Studio history) -----
+    const bridge = applyVisionBridge({ ctl: ctlAny, messages, cfg, seen });
+    patchRuntime(invocationId, {
+      injectedImages: bridge.injected.map((i) => i.relativePath),
+      skippedImages: bridge.skippedDuplicates,
+      note: bridge.injected.length > 0
+        ? `Injected ${bridge.injected.length} image(s) into the outgoing vision request.`
+        : "No new MCP image needed for this round.",
+    });
+    dbg("gen", "outgoing chat prepared", {
+      outgoingMessages: bridge.messages.length,
+      injectedImages: bridge.injected.map((i) => i.relativePath),
+      skippedDuplicates: bridge.skippedDuplicates,
+    });
 
-  // --- tool calls: report to LM Studio (it executes the MCP tools) and stop ---
-  if (result.toolCalls.length > 0) {
-    for (const tc of result.toolCalls) {
-      let args: Record<string, unknown> = {};
-      try {
-        const p = JSON.parse(tc.function.arguments || "{}") as unknown;
-        if (p && typeof p === "object" && !Array.isArray(p)) args = p as Record<string, unknown>;
-      } catch (e) {
-        warn("gen", "tool call arguments were not valid JSON", {
-          raw: (tc.function.arguments ?? "").slice(0, 300),
-          error: String(e),
+    // --- tool definitions: probe the controller -----------------------------
+    const tools = toOpenAITools(getControllerTools(ctlAny));
+    patchRuntime(invocationId, { toolCount: tools?.length ?? 0 });
+    if (tools) {
+      dbg("gen", "forwarding tool definitions to model", { count: tools.length, names: tools.map((t) => t.function.name) });
+    } else {
+      warn("gen", "no tool definitions found on the controller — model cannot issue MCP tool calls this round");
+    }
+
+    const req: ChatRequest = { model: cfg.model, messages: bridge.messages, stream: true };
+    if (tools && tools.length > 0) req.tools = tools;
+
+    // --- stream text deltas back to LM Studio -------------------------------
+    const newCtl = ctlAny as NewGeneratorController;
+    const emit = (t: string): void => {
+      if (typeof newCtl.fragmentGenerated === "function") {
+        try { newCtl.fragmentGenerated(t); }
+        catch (e) { dbg("gen", "fragmentGenerated threw (host may have cancelled); continuing loopback drain", String(e)); }
+      }
+    };
+
+    let textChars = 0;
+    let reasoningChars = 0;
+    let reasoningEvents = 0;
+    let toolEvents = 0;
+    const observer: ChatStreamObserver = {
+      onRequestStart: ({ at }) => patchRuntime(invocationId, {
+        phase: "connecting", requestStartedAt: at, note: "Opening LM Studio loopback request…",
+      }),
+      onConnected: ({ at, status }) => patchRuntime(invocationId, {
+        phase: "connected", connectedAt: at, lastNetworkActivityAt: at,
+        note: `HTTP ${status} connected. Waiting for model stream activity.`,
+      }),
+      onNetworkActivity: ({ at }) => patchRuntime(invocationId, { lastNetworkActivityAt: at }),
+      onReasoningActivity: ({ at, chars }) => {
+        reasoningChars += chars; reasoningEvents += 1;
+        patchRuntime(invocationId, {
+          phase: "reasoning", lastModelActivityAt: at, reasoningChars, reasoningEvents,
+          note: "Reasoning stream activity detected (text intentionally hidden).",
         });
-      }
+      },
+      onContentActivity: ({ at, chars }) => {
+        textChars += chars;
+        patchRuntime(invocationId, { phase: "generating", lastModelActivityAt: at, textChars, note: "Answer text is streaming." });
+      },
+      onToolActivity: ({ at, fragments }) => {
+        toolEvents += fragments;
+        patchRuntime(invocationId, { phase: "tool_call", lastModelActivityAt: at, toolEvents, note: "Model is generating a tool call." });
+      },
+      onComplete: ({ finishReason }) => patchRuntime(invocationId, { finishReason }),
+    };
 
-      const reportedNew = reportToolCallNewApi(ctlAny, tc);
-      if (reportedNew) {
-        info("gen", "stopping: LM Studio will execute the MCP tool(s) and call generate() again");
-        continue;
-      }
+    let result: Awaited<ReturnType<typeof chatCompletionStream>>;
+    try {
+      result = await chatCompletionStream(
+        { apiRoot: cfg.apiRoot, apiKey: cfg.apiKey, timeoutMs: cfg.timeoutMs },
+        req,
+        emit,
+        { signal: requestAbort.signal, observer }
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = e && typeof e === "object" && "code" in e ? String((e as { code?: unknown }).code ?? "") : "";
+      const aborted = code === "api_aborted" || requestAbort.signal.aborted;
+      err("gen", "loopback request failed", { code, message: msg });
+      patchRuntime(invocationId, { phase: aborted ? "aborted" : "error", error: msg, note: aborted ? "Request stopped." : "Loopback request failed." });
+      emit(`⚠️ Vision Bridge: ${msg}`);
+      return;
+    }
 
-      // Legacy fallback (old beta host API: report_tool_call & co.)
-      const reportedLegacy = reportToolCall(ctlAny, { id: tc.id, tool: tc.function.name, args });
-      if (!reportedLegacy) {
-        err("gen", "tool call could not be reported to LM Studio (no known API on the controller)");
-        emit(
-          `⚠️ Vision Bridge: tool call "${tc.function.name}" could not be forwarded to LM Studio ` +
-            "(SDK adapter mismatch). Check the vision-bridge log."
-        );
+    info("gen", "model output received", {
+      contentChars: result.content.length,
+      toolCalls: result.toolCalls.length,
+      model: result.model,
+      finishReason: result.finishReason,
+      viaStream: result.viaStream,
+    });
+
+    // --- tool calls: report to LM Studio (it executes MCP) and stop ----------
+    if (result.toolCalls.length > 0) {
+      patchRuntime(invocationId, { phase: "tool_call", note: `Forwarding ${result.toolCalls.length} tool call(s) to LM Studio.` });
+      for (const tc of result.toolCalls) {
+        let args: Record<string, unknown> = {};
+        try {
+          const p = JSON.parse(tc.function.arguments || "{}") as unknown;
+          if (p && typeof p === "object" && !Array.isArray(p)) args = p as Record<string, unknown>;
+        } catch (e) {
+          warn("gen", "tool call arguments were not valid JSON", { raw: (tc.function.arguments ?? "").slice(0, 300), error: String(e) });
+        }
+
+        const reportedNew = reportToolCallNewApi(ctlAny, tc);
+        if (reportedNew) {
+          info("gen", "LM Studio will execute the MCP tool(s) and call generate() again");
+          continue;
+        }
+
+        const reportedLegacy = reportToolCall(ctlAny, { id: tc.id, tool: tc.function.name, args });
+        if (!reportedLegacy) {
+          err("gen", "tool call could not be reported to LM Studio (no known API on the controller)");
+          patchRuntime(invocationId, { phase: "error", error: `Tool call "${tc.function.name}" could not be forwarded to LM Studio.` });
+          emit(
+            `⚠️ Vision Bridge: tool call "${tc.function.name}" could not be forwarded to LM Studio ` +
+              "(SDK adapter mismatch). Check the vision-bridge log."
+          );
+          return;
+        }
       }
+      patchRuntime(invocationId, {
+        phase: "completed", finishReason: result.finishReason,
+        note: "Tool call forwarded. Waiting for LM Studio to execute MCP and start the next round.",
+      });
+      return;
+    }
+
+    patchRuntime(invocationId, {
+      phase: "completed", finishReason: result.finishReason,
+      note: "Model response completed normally.",
+    });
+  } finally {
+    stopAbortWatcher();
+    stopHeartbeat();
+    if (hostSignal && typeof hostSignal === "object" && "removeEventListener" in hostSignal) {
+      try { (hostSignal as AbortSignal).removeEventListener("abort", onHostAbort); } catch { /* ignore */ }
     }
   }
 }

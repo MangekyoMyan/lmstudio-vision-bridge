@@ -94,7 +94,7 @@ npm run phase1:vision
 5. タイムアウト/ハングする ⇒ 下記 Fallback
 
 診断ログ: `<prediction の working directory>/.vision-bridge.log`
-- `api_queued (HTTP 202)` / `api_error 503` / `api_timeout` → モデルの占有・キューによるデッドロックと見なしてFallback
+- `api_queued (HTTP 202)` / `api_error 503` → モデルの占有・キューによるデッドロックを疑う。`api_timeout` は `timeoutMs > 0` のときだけ発生
 - `api_connect_failed` → サーバー未起動/ポート違い → `apiRoot` を確認
 - `api_error ... model not found` 等 → `model` 設定がロード済みモデルと不一致 → 設定を合わせる
 
@@ -148,7 +148,22 @@ npm run phase3:bridge
 - 新しいtool result(別画像)を追加した履歴 → **新規画像だけ**が投入される(既存はスキップ)
 - synthetic messageは **送信コピー에만** 存在し、入力の履歴配列は変更されないことを確認
 
-## Phase 4 — Blender MCP 実機E2E
+## Phase 4 — Runtime / GUI control (API mock)
+
+```bash
+npm run phase4:control
+```
+
+決定論的なmock SSE serverを使い、以下を確認する。
+
+1. reasoning-only stream eventが `~/.vision-bridge/runtime.json` に `reasoning` として記録される
+2. `timeoutMs=0` で静かなlong-running requestが自動中断されない
+3. GUIと同じ `~/.vision-bridge/control.json` 方式でactive invocationをAbortできる
+4. Abort後のruntime phaseが `aborted` になる
+
+> reasoning本文はruntimeへ保存しない。activity event数/文字数だけを記録する。
+
+## Phase 5 — Blender MCP 実機E2E
 
 1. LM StudioでBlender MCPが有効な状態(従来どおりMCP動作することを確認)
 2. UIでQwen3.8-27B(Generator=本プラグイン)に:
@@ -171,7 +186,8 @@ npm run phase3:bridge
 | `cannot reach LM Studio API` | サーバー未起動・ポート違い | LM StudioローカルサーバーON、`apiRoot`確認（別ポート運用なら `VISION_BRIDGE_API_ROOT`） |
 | `LM Studio API returned 503` | モデル占有/未ロード | モデルロード確認。持続すればFallback |
 | `api_error ... model not found`（404系） | `model` 設定とロード済みモデルIDの不一致 | `model` をロード済みモデルIDに変更（README「モデル名・API先を変える場所」） |
-| `request was queued (HTTP 202)` / 無応答で `api_timeout` | **折り返しがキューでデッドロック**(最大のリスク) | Fallback(下記) |
+| `request was queued (HTTP 202)` | 折り返しがキューで待機 | GUI状態・ログ確認。必要ならFallback |
+| `api_timeout` | `timeoutMs > 0` のabsolute timeout超過 | timeoutを延長/0で無効化。GUIで状態確認・手動Abort |
 | tool callが報告されない | host SDKのメソッド名違い | ログ `availableKeys` を見て `src/controller.ts` の `REPORT_METHODS` に追加 → build同期 |
 | 「no tool definitions found」 | controllerにツール定義がない | generateの引数/controller表面を確認。`getModelInfo`ログでhostの形状を確認 |
 | 画像が検出されない | tool resultの表現が想定外 | ログ `values` を見て `src/image-detect.ts` のregexを追加 |

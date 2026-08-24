@@ -69,7 +69,7 @@ export function getControllerTools(ctl: AnyController | null | undefined): unkno
 export function getModelInfo(ctl: AnyController | null | undefined): Record<string, unknown> | null {
   if (!ctl) return null;
   for (const name of ["get_model_info", "getModelInfo", "modelInfo"]) {
-    const v = ctl[name];
+    const v: unknown = ctl[name];
     if (v && typeof v === "object") return v as Record<string, unknown>;
     if (typeof v === "function") {
       try {

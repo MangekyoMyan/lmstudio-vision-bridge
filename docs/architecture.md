@@ -93,10 +93,56 @@ user:       [Vision Bridge internal message]
 - `requoteOriginalRequest`(既定 `true`)の場合: **直前のuserリクエストを逐語引用**して注記する
   (`findOriginalPendingRequest` が最後のtoolメッセージより前の最後のuserテキストを抽出)。
   モデルが「画像の説明だけで止まる」挙動を減らす狙い。`false` にすると `syntheticText` のみになる。
-  ※ 2026-07時点では `src/` と `.lmstudio/dev.js` にのみ存在し `build/` ミラーには未反映(ハーネスは旧挙動で検証)
+  `src/` と `build/` は現在同期済み。`src/*.ts` を変更した場合は `npm run build` で `build/` を再生成してからテストする。
 
 ## 意図的に置かないもの
 
 - UI自動操作・クリップボード・常時フォルダ監視: タイミング推測が怪しく、要件でも除外
 - 巨大フレームワーク: Generator本体は `node:*` + fetch のみ(依存パッケージは開発用のTypeScriptだけ)
 - MCPクライアント実装: 触れない
+
+## Runtime telemetry / GUI (2026-08-25)
+
+長時間のloopback推論を固定時間で切るのではなく、「今どこで待っているか」を観測できるようにした。
+
+```text
+LM Studio Plugin process
+  ├─ runtime heartbeat (~1s)
+  ├─ HTTP/SSE activity observer
+  ├─ reasoning activity counter (本文は保存しない)
+  └─ AbortController
+       ▲
+       │ ~/.vision-bridge/control.json
+       │
+Local GUI process (127.0.0.1:19280)
+  ├─ runtime.json表示
+  ├─ user config編集
+  ├─ Abort
+  ├─ dedup reset
+  └─ log tail / optional lms dev spawn
+```
+
+共有状態は `~/.vision-bridge/runtime.json`。チャット本文、画像data URL、API keyは書かない。
+GUI/telemetryが壊れてもgeneration本体を壊さないbest-effort設計。
+
+`timeoutMs=0` はabsolute timeout無効。正値だけsetTimeoutでAbortする。
+LM Studio側の`ctl.abortSignal`とGUI Abortは同じrequest AbortControllerへ連結する。
+
+reasoning本文は可視化しない。`reasoning_content` / `reasoning` / `reasoning_text` / `analysis` のストリーム活動を文字数・event数として記録するだけ。
+
+## Security guard
+
+Vision Bridgeはスクリーンショットをdata URLとして送るため、`apiRoot` はloopback hostだけ許可する。
+
+- localhost
+- 127.x.x.x
+- ::1
+
+非loopback endpointは `api_non_loopback` で拒否する。GUI serverも127.0.0.1のみbind。
+
+## Correctness fixes (2026-08-25)
+
+- config merge順を修正: env > working-directory config > user config > defaults
+- dedup hash cacheを廃止: path+size同一でも内容が変われば必ず再hash
+- 既存OpenAI `image_url` user partをhistory変換で保持
+- wire message `content` 型からnullを排除

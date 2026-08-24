@@ -22,7 +22,7 @@ export interface OpenAIToolCall {
 
 export interface OpenAIChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | OpenAIPart[] | null;
+  content: string | OpenAIPart[];
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
 }

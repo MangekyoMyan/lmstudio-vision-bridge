@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Vision Bridge Control Panel</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">LM Studio MCP Vision Bridge</div>
+        <h1>Control Panel <span class="eye">◉</span></h1>
+      </div>
+      <div id="phaseBadge" class="badge idle">NO REQUEST</div>
+    </header>
+
+    <section class="grid hero-grid">
+      <article class="card status-card">
+        <div class="card-title">Runtime</div>
+        <div class="status-line"><span id="pulse" class="pulse"></span><strong id="statusText">Waiting for plugin…</strong></div>
+        <div id="statusNote" class="muted">No runtime state has been written yet.</div>
+        <div class="metrics">
+          <div><span>Elapsed</span><strong id="elapsed">—</strong></div>
+          <div><span>Last model activity</span><strong id="lastActivity">—</strong></div>
+          <div><span>Bridge heartbeat</span><strong id="heartbeat">—</strong></div>
+          <div><span>Reasoning activity</span><strong id="reasoning">—</strong></div>
+          <div><span>Output</span><strong id="outputChars">—</strong></div>
+          <div><span>Tool events</span><strong id="toolEvents">—</strong></div>
+        </div>
+        <div class="actions">
+          <button id="abortBtn" class="danger" disabled>Abort current request</button>
+          <button id="resetDedupBtn" class="secondary">Reset seen images</button>
+        </div>
+        <p class="hint">「Bridge heartbeat」が動いていて「Last model activity」だけ止まっている場合、Bridge自体は生きています。モデルが無言で長考しているか、LM Studio内部で待機している状態です。</p>
+      </article>
+
+      <article class="card detail-card">
+        <div class="card-title">Active request</div>
+        <dl>
+          <dt>Model</dt><dd id="activeModel">—</dd>
+          <dt>API</dt><dd id="activeApi">—</dd>
+          <dt>Timeout</dt><dd id="activeTimeout">—</dd>
+          <dt>Working dir</dt><dd id="workingDir">—</dd>
+          <dt>Images</dt><dd id="images">—</dd>
+          <dt>LM Studio dev</dt><dd id="devState">—</dd>
+        </dl>
+      </article>
+    </section>
+
+    <section class="grid lower-grid">
+      <article class="card">
+        <div class="card-title">Settings</div>
+        <form id="configForm">
+          <label>Model ID<input id="model" name="model" placeholder="qwen/qwen3.8-27b" /></label>
+          <label>LM Studio API<input id="apiRoot" name="apiRoot" placeholder="http://127.0.0.1:1238" /></label>
+          <label>API key<input id="apiKey" name="apiKey" type="password" placeholder="lm-studio" /></label>
+          <label>Absolute timeout (ms)<input id="timeoutMs" name="timeoutMs" type="number" min="0" step="1000" /><small>0 = disabled. GUIのAbortは常に使用できます。</small></label>
+          <div class="row checks">
+            <label class="check"><input id="bridgeEnabled" type="checkbox" /> Vision bridge enabled</label>
+            <label class="check"><input id="requoteOriginalRequest" type="checkbox" /> Re-quote original request</label>
+          </div>
+          <label>Log level
+            <select id="logLevel"><option>debug</option><option>info</option><option>warn</option><option>error</option></select>
+          </label>
+          <button type="submit">Save settings</button>
+          <div id="saveResult" class="muted"></div>
+          <p class="hint">設定はユーザー側 <code>~/.vision-bridge/config.json</code> に保存され、次の推論から反映されます。working directory側のconfigがある場合は、そちらが優先されます。</p>
+        </form>
+      </article>
+
+      <article class="card log-card">
+        <div class="tabs">
+          <button class="tab active" data-tab="bridge">Bridge log</button>
+          <button class="tab" data-tab="dev">lms dev</button>
+        </div>
+        <div id="logPath" class="muted log-path"></div>
+        <pre id="logText">Waiting for logs…</pre>
+      </article>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
