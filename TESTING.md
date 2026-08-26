@@ -206,3 +206,22 @@ npm run phase4:control
    ```
 3. `<working directory>/.vision-bridge/config.json` に `{ "apiRoot": "http://127.0.0.1:18080" }`
 4. UIで再テスト。MCPループ(5.〜8.の手順)はそのまま使える
+
+
+## Phase 5 — OpenAI-compatible Proxy
+
+```bash
+npm run phase5:proxy
+```
+
+モックUpstreamを使い、以下を確認する。
+
+1. ProxyがOpenAI互換endpointとして起動する
+2. output Bearer keyが機能する
+3. `GET /v1/models`をUpstreamへ中継する
+4. streaming `POST /v1/chat/completions`を中継する
+5. Upstream URLが`.../v1`で終わっていても`/v1/v1/...`にならない
+6. optional `openAiModel` overrideが機能する
+7. tool resultの相対画像を`proxyWorkingDirectory`から解決し、Vision synthetic user messageをUpstreamへ注入する
+
+既存Phase 1〜4はLM Studio Generator regression testとして引き続き必須。

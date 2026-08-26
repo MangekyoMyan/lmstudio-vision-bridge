@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.openAiEndpoint = openAiEndpoint;
 exports.chatCompletionStream = chatCompletionStream;
 /**
  * Minimal OpenAI-compatible client for the loopback request
@@ -15,6 +16,11 @@ exports.chatCompletionStream = chatCompletionStream;
 const log_js_1 = require("./log.js");
 const messages_js_1 = require("./messages.js");
 const types_js_1 = require("./types.js");
+function openAiEndpoint(apiRoot, route) {
+    const base = apiRoot.replace(/\/+$/, "");
+    const normalizedRoute = route.startsWith("/") ? route : `/${route}`;
+    return /\/v1$/i.test(base) ? `${base}${normalizedRoute}` : `${base}/v1${normalizedRoute}`;
+}
 function safeCall(fn) {
     if (!fn)
         return;
@@ -178,7 +184,7 @@ function abortBridgeError(url, timedOut, detail) {
 }
 async function chatCompletionStream(cfg, req, onDelta, options = {}) {
     assertLoopbackApiRoot(cfg.apiRoot);
-    const url = `${cfg.apiRoot.replace(/\/+$/, "")}/v1/chat/completions`;
+    const url = openAiEndpoint(cfg.apiRoot, "/chat/completions");
     const incoming = Array.isArray(req.messages) ? req.messages : [];
     (0, log_js_1.info)("api", "outgoing message shapes (pre-send)", {
         count: incoming.length,

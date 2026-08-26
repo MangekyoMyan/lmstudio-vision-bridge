@@ -1,13 +1,12 @@
 # AI_STATUS — Vision Bridge current state
 
-> 更新: 2026-08-25
+> 更新: 2026-08-27
 > 次のAIは、コード編集前にこのファイルと `AI_README.md` を読むこと。
 
 ## 1. 目的
 
-LM StudioのMCPツールがworking directoryへ保存した画像を、Generator Pluginが検出し、
-**LM Studioへ送る履歴のコピーだけ**にsynthetic user + `image_url`として挿入する。
-MCP実行そのものはLM Studioに残す。
+MCPツールが返した画像をVisionモデルへ確実に渡す。現在は **LM Studio Generator** と **OpenAI-compatible Proxy** の2アダプタを持つ。
+LM Studio経路ではMCP実行そのものをLM Studioに残す。OpenAI Proxy経路ではOpen WebUI等とOpenAI互換モデルAPIの間に挟む。
 
 ```text
 LM Studio Chat
@@ -31,7 +30,9 @@ LM Studio Chat
 | mock harness | ✅ 全テスト通過 |
 | GUI Control Panel | ✅ 追加 |
 | absolute timeout無効化 (`timeoutMs=0`) | ✅ 既定 |
-| GUIから手動Abort | ✅ mock test済み |
+| GUIから手動Abort | ✅ LM Studio / OpenAI Proxy両経路対応 |
+| OpenAI-compatible Proxy | ✅ `/v1/models` + streaming `/v1/chat/completions` |
+| `/v1`付き/なしUpstream URL | ✅ 両対応 |
 | reasoning stream活動の可視化 | ✅ 本文は表示せずactivityのみ |
 | `src/` と `build/` | ✅ 同期済み |
 
@@ -48,6 +49,7 @@ npm run phase1:text -- --mock
 npm run phase1:vision -- --mock
 npm run phase1:sdkchat
 npm run phase4:control
+npm run phase5:proxy
 ```
 
 `phase4:control` は以下を決定論的に確認する:
@@ -63,9 +65,9 @@ npm run phase4:control
 | File | Responsibility |
 |---|---|
 | `vision-bridge/src/index.ts` | 現行host entry / history adapter / runtime telemetry / Abort連携 / tool call reporting |
-| `vision-bridge/src/openai-client.ts` | localhost API / SSE / reasoning activity検出 / timeout / external Abort / loopback-only guard |
+| `vision-bridge/src/openai-client.ts` | LM Studio Generator側のAPI / SSE / reasoning activity / timeout / loopback guard / `/v1` URL正規化 |
 | `vision-bridge/src/runtime-state.ts` | GUIとPluginのcross-process runtime/control JSON |
-| `vision-bridge/src/vision-bridge.ts` | MCP画像 -> synthetic user message注入 |
+| `vision-bridge/src/vision-bridge.ts` | MCP画像 -> synthetic user message注入。LM Studio変換経路 + OpenAI request保持経路 |
 | `vision-bridge/src/image-detect.ts` | tool resultの画像参照抽出・解決 |
 | `vision-bridge/src/dedup.ts` | 画像内容SHA-256重複排除 |
 | `vision-bridge/src/messages.ts` | LM/SDK history -> OpenAI wire format |
@@ -77,7 +79,8 @@ npm run phase4:control
 
 | File | Responsibility |
 |---|---|
-| `vision-bridge/gui/server.mjs` | 127.0.0.1:19280 local GUI server / config / Abort / dedup reset / optional `lms dev` spawn |
+| `vision-bridge/gui/server.mjs` | 127.0.0.1:19280 GUI / mode切替 / config / Abort / dedup reset / `lms dev` or Proxy child管理 |
+| `vision-bridge/proxy/server.mjs` | standalone OpenAI-compatible proxy。既定0.0.0.0:19281 |
 | `vision-bridge/gui/public/*` | Control Panel frontend |
 | `start-vision-bridge-gui.cmd` | Windows one-click launcher |
 
@@ -88,6 +91,7 @@ npm run phase4:control
 - `message-normalize-test.mjs`
 - `phase1-sdkchat-test.mjs`
 - `phase4-control-test.mjs`
+- `phase5-proxy-test.mjs`
 
 ## 5. 絶対に壊さない不変条件
 
@@ -98,7 +102,7 @@ npm run phase4:control
 5. 画像の重複判定は**実ファイル内容SHA-256**。
 6. 画像読み込み/encoding成功前にseen登録しない。
 7. OpenAI wire `content` はnull/raw objectを送らない。user Visionのみtext/image_url配列可。
-8. 推論APIはloopbackのみ。画像をremote endpointへ送らない。
+8. **LM Studio Generatorの`apiRoot`はloopback限定を維持する。** OpenAI ProxyのUpstreamは汎用URLを許可するため、外部Upstreamへ画像を送る可能性をREADME/GUIで明示する。
 9. `src`変更後は`npm run build`して`build`を同期する。
 10. telemetry/controlの失敗で本体のgenerationを壊さない。
 
@@ -117,9 +121,15 @@ environment
 
 | key | default |
 |---|---|
+| `mode` | `lmstudio` |
 | `apiRoot` | `http://127.0.0.1:1238` |
 | `apiKey` | `lm-studio` |
 | `model` | `qwen/qwen3.8-27b` |
+| `openAiApiRoot` | `http://127.0.0.1:8080/v1` |
+| `openAiModel` | empty = client modelを保持 |
+| `proxyHost` | `0.0.0.0` |
+| `proxyPort` | `19281` |
+| `proxyApiKey` | `vision-bridge` |
 | `timeoutMs` | `0` (absolute timeout disabled) |
 | `maxImageBytes` | 20MB |
 | `logLevel` | `info` |
@@ -155,7 +165,7 @@ heartbeatは約1秒ごと。モデルがreasoning streamを出す場合は`reaso
 ### GUI Abort
 
 GUIはactive `invocationId` を `control.json` へ書く。
-Plugin側は約500ms周期でpollし、対象invocationならAbortControllerをabortする。
+LM Studio Plugin / OpenAI Proxyの両方が約500ms周期でpollし、対象invocationならAbortControllerをabortする。
 LM Studio自身の`ctl.abortSignal`も同じrequest AbortControllerへ連結する。
 
 ## 8. 今回修正した主な不具合
@@ -186,14 +196,11 @@ LM Studio自身の`ctl.abortSignal`も同じrequest AbortControllerへ連結す�
 
 ## 9. セキュリティ
 
-`openai-client.ts` は非loopback `apiRoot` を拒否する。
-許可host:
+LM Studio Generator側の`openai-client.ts`は従来通り非loopback `apiRoot` を拒否する。
 
-- `localhost`
-- `127.x.x.x`
-- `::1`
+OpenAI Proxy modeは汎用OpenAI互換Upstreamを目的とするため非loopbackも許可する。したがって外部Upstreamを設定した場合、注入画像もそこへ送られる。
 
-GUI serverも `127.0.0.1` のみにbind。
+GUI serverは `127.0.0.1:19280` のみにbind。OpenAI Proxy outputはDockerから使うため既定 `0.0.0.0:19281`、既定Bearer keyは `vision-bridge`。Docker不要なら`127.0.0.1`へ変更可能。
 
 ## 10. 既知の限界
 
@@ -207,11 +214,22 @@ GUI serverも `127.0.0.1` のみにbind。
 
 1. `start-vision-bridge-gui.cmd`
 2. GUIが `127.0.0.1:19280` で開く
-3. `lms dev` logが表示される
-4. LM StudioでVision Bridge Generatorを選ぶ
+3. Mode=LM Studioなら`lms dev`、Mode=OpenAIならOpenAI proxyが起動する
+4. LM Studio modeではVision Bridge Generatorを選ぶ
 5. 長考時にheartbeatが更新され続ける
 6. reasoning対応backendなら`REASONING`になる
 7. GUI AbortでLM Studio側のpredictionが停止する
 8. Blender MCP画像が`injectedImages`へ出る
 9. MCP tool call後に次roundへ継続する
 
+
+
+## 12. OpenAI-compatible Proxy adapter (2026-08-27)
+
+- GUIで `mode = lmstudio | openai` を切替。既定は後方互換の `lmstudio`。
+- LM Studio用 `apiRoot/apiKey/model` とOpenAI Proxy用 `openAiApiRoot/openAiApiKey/openAiModel` は別々に保存。
+- Proxy output既定: `0.0.0.0:19281`。Docker/Open WebUIからは `http://host.docker.internal:19281/v1`。
+- Upstreamは `http://host:port` と `http://host:port/v1` の両方を受理。
+- `/v1/models` はUpstreamへforward。`/v1/chat/completions` はstream/non-streamをforward。
+- OpenAI Proxyでは既存OpenAI messagesを再正規化せず保持し、Vision synthetic messageだけ挿入する。
+- Proxy dedup stateは `~/.vision-bridge/proxy-seen.json` でLM Studio working-directory stateと分離。

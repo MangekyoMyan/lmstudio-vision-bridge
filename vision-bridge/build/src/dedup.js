@@ -24,8 +24,10 @@ const MAX_ENTRIES = 2000;
 class SeenTracker {
     byHash = new Map();
     stateFile;
-    constructor(workingDirectory) {
-        this.stateFile = workingDirectory ? node_path_1.default.join(workingDirectory, STATE_DIRNAME, STATE_FILE) : null;
+    constructor(workingDirectory, stateFileOverride) {
+        this.stateFile = stateFileOverride !== undefined
+            ? stateFileOverride
+            : workingDirectory ? node_path_1.default.join(workingDirectory, STATE_DIRNAME, STATE_FILE) : null;
         this.load();
     }
     load() {

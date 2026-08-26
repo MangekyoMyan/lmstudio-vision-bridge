@@ -10,7 +10,7 @@
   <main class="shell">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LM Studio MCP Vision Bridge</div>
+        <div class="eyebrow">MCP Vision Bridge</div>
         <h1>Control Panel <span class="eye">◉</span></h1>
       </div>
       <div id="phaseBadge" class="badge idle">NO REQUEST</div>
@@ -19,7 +19,7 @@
     <section class="grid hero-grid">
       <article class="card status-card">
         <div class="card-title">Runtime</div>
-        <div class="status-line"><span id="pulse" class="pulse"></span><strong id="statusText">Waiting for plugin…</strong></div>
+        <div class="status-line"><span id="pulse" class="pulse"></span><strong id="statusText">Waiting for bridge…</strong></div>
         <div id="statusNote" class="muted">No runtime state has been written yet.</div>
         <div class="metrics">
           <div><span>Elapsed</span><strong id="elapsed">—</strong></div>
@@ -33,18 +33,20 @@
           <button id="abortBtn" class="danger" disabled>Abort current request</button>
           <button id="resetDedupBtn" class="secondary">Reset seen images</button>
         </div>
-        <p class="hint">「Bridge heartbeat」が動いていて「Last model activity」だけ止まっている場合、Bridge自体は生きています。モデルが無言で長考しているか、LM Studio内部で待機している状態です。</p>
+        <p class="hint">Bridge heartbeatが動いていてLast model activityだけ止まっている場合、Bridge自体は生きています。Reasoning activityはAPIから観測できたreasoning断片だけを数えます。</p>
       </article>
 
       <article class="card detail-card">
         <div class="card-title">Active request</div>
         <dl>
+          <dt>Mode</dt><dd id="activeMode">—</dd>
           <dt>Model</dt><dd id="activeModel">—</dd>
-          <dt>API</dt><dd id="activeApi">—</dd>
+          <dt>Upstream API</dt><dd id="activeApi">—</dd>
           <dt>Timeout</dt><dd id="activeTimeout">—</dd>
           <dt>Working dir</dt><dd id="workingDir">—</dd>
           <dt>Images</dt><dd id="images">—</dd>
           <dt>LM Studio dev</dt><dd id="devState">—</dd>
+          <dt>OpenAI proxy</dt><dd id="proxyState">—</dd>
         </dl>
       </article>
     </section>
@@ -53,10 +55,48 @@
       <article class="card">
         <div class="card-title">Settings</div>
         <form id="configForm">
-          <label>Model ID<input id="model" name="model" placeholder="qwen/qwen3.8-27b" /></label>
-          <label>LM Studio API<input id="apiRoot" name="apiRoot" placeholder="http://127.0.0.1:1238" /></label>
-          <label>API key<input id="apiKey" name="apiKey" type="password" placeholder="lm-studio" /></label>
-          <label>Absolute timeout (ms)<input id="timeoutMs" name="timeoutMs" type="number" min="0" step="1000" /><small>0 = disabled. GUIのAbortは常に使用できます。</small></label>
+          <label class="mode-picker">Mode
+            <select id="mode">
+              <option value="lmstudio">LM Studio Generator</option>
+              <option value="openai">OpenAI-compatible Proxy</option>
+            </select>
+            <small>LM Studioは従来のGenerator方式。OpenAI-compatibleはOpen WebUI等とモデルAPIの間に挟みます。</small>
+          </label>
+
+          <div id="lmstudioSettings" class="settings-group">
+            <div class="group-title">LM Studio Generator</div>
+            <label>Model ID<input id="model" name="model" placeholder="qwen/qwen3.8-27b" /></label>
+            <label>LM Studio model API<input id="apiRoot" name="apiRoot" placeholder="http://127.0.0.1:1238" /><small><code>/v1</code>付き・なし両方に対応。</small></label>
+            <label>LM Studio API key<input id="apiKey" name="apiKey" type="password" placeholder="lm-studio" /></label>
+          </div>
+
+          <div id="openaiSettings" class="settings-group hidden">
+            <div class="group-title">OpenAI-compatible upstream (実際のモデル)</div>
+            <label>Model API<input id="openAiApiRoot" placeholder="http://127.0.0.1:8080/v1" /><small>例: <code>http://host.docker.internal:8080/v1</code>。<code>/v1</code>付き・なし両方に対応。</small></label>
+            <label>Upstream API key<input id="openAiApiKey" type="password" placeholder="空欄ならAuthorizationを付けません" /></label>
+            <label>Model override (optional)<input id="openAiModel" placeholder="空欄 = Open WebUI等が指定したmodelをそのまま使用" /></label>
+
+            <div class="group-title spaced">Vision Bridge API output</div>
+            <div class="two-col">
+              <label>Output port<input id="proxyPort" type="number" min="1024" max="65535" /></label>
+              <label>Listen host
+                <select id="proxyHost">
+                  <option value="0.0.0.0">0.0.0.0 (Docker/Open WebUI対応)</option>
+                  <option value="127.0.0.1">127.0.0.1 (このPCのみ)</option>
+                </select>
+              </label>
+            </div>
+            <label>Output API key<input id="proxyApiKey" type="password" placeholder="vision-bridge" /><small>Open WebUI側のAPI key欄にも同じ値を入れます。空欄で認証なし。</small></label>
+            <label>Image working directory (optional)<input id="proxyWorkingDirectory" placeholder="例: F:\AI\MCP_work" /><small>tool resultが相対画像パスを返す場合だけ指定。絶対パスなら通常不要です。</small></label>
+
+            <div class="endpoint-box">
+              <div><span>Open WebUI / Docker</span><code id="dockerEndpoint">http://host.docker.internal:19281/v1</code></div>
+              <div><span>Windows / host</span><code id="windowsEndpoint">http://127.0.0.1:19281/v1</code></div>
+            </div>
+            <p class="hint compact">デフォルト出力ポートは <code>19281</code>。GUIの19280と並べつつ、1234 / 3000 / 5000 / 7860 / 8000 / 8080など定番ポートを避けています。</p>
+          </div>
+
+          <label>Absolute timeout (ms)<input id="timeoutMs" name="timeoutMs" type="number" min="0" step="1000" /><small>0 = disabled. GUIのAbortはどちらのModeでも使用できます。</small></label>
           <div class="row checks">
             <label class="check"><input id="bridgeEnabled" type="checkbox" /> Vision bridge enabled</label>
             <label class="check"><input id="requoteOriginalRequest" type="checkbox" /> Re-quote original request</label>
@@ -64,9 +104,9 @@
           <label>Log level
             <select id="logLevel"><option>debug</option><option>info</option><option>warn</option><option>error</option></select>
           </label>
-          <button type="submit">Save settings</button>
+          <button type="submit">Save settings & apply mode</button>
           <div id="saveResult" class="muted"></div>
-          <p class="hint">設定はユーザー側 <code>~/.vision-bridge/config.json</code> に保存され、次の推論から反映されます。working directory側のconfigがある場合は、そちらが優先されます。</p>
+          <p class="hint">設定はユーザー側 <code>~/.vision-bridge/config.json</code> に保存されます。LM Studio用とOpenAI-compatible用の接続先は別々に保存するため、Modeを切り替えても元の設定を壊しません。</p>
         </form>
       </article>
 
@@ -74,6 +114,7 @@
         <div class="tabs">
           <button class="tab active" data-tab="bridge">Bridge log</button>
           <button class="tab" data-tab="dev">lms dev</button>
+          <button class="tab" data-tab="proxy">OpenAI proxy</button>
         </div>
         <div id="logPath" class="muted log-path"></div>
         <pre id="logText">Waiting for logs…</pre>

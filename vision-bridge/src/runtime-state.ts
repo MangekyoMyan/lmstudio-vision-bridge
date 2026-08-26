@@ -35,6 +35,7 @@ export interface RuntimeState {
   lastModelActivityAt?: number;
   model: string;
   apiRoot: string;
+  transportMode?: "lmstudio" | "openai";
   timeoutMs: number;
   workingDirectory: string | null;
   logFile: string;

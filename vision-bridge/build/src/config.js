@@ -10,6 +10,13 @@ exports.loadConfig = loadConfig;
  * Priority: environment variables > <working directory>/.vision-bridge/config.json
  *          > ~/.vision-bridge/config.json > defaults.
  *
+ * `mode` controls only HOW Vision Bridge is exposed:
+ *   - lmstudio: existing LM Studio Generator plugin path (default / backward compatible)
+ *   - openai:   standalone OpenAI-compatible proxy for Open WebUI etc.
+ *
+ * The two modes deliberately keep separate upstream settings so switching
+ * modes never overwrites the known-good LM Studio configuration.
+ *
  * timeoutMs = 0 disables the absolute timeout. The optional GUI can still
  * abort the active request manually.
  */
@@ -37,12 +44,13 @@ function toLevel(v) {
     const s = v.toLowerCase();
     return s === "debug" || s === "warn" || s === "error" ? s : "info";
 }
+function toMode(v) {
+    const s = v.trim().toLowerCase();
+    return s === "openai" || s === "openai_proxy" || s === "proxy" ? "openai" : "lmstudio";
+}
 function loadConfig(workingDirectory) {
     const fileCfg = {};
-    // Merge LOW -> HIGH priority. The previous implementation accidentally
-    // merged working-directory config first and the user config second, which
-    // made ~/.vision-bridge/config.json override the project-local config even
-    // though the documented priority said the opposite.
+    // Merge LOW -> HIGH priority.
     const candidates = [
         node_path_1.default.join(node_os_1.default.homedir(), ".vision-bridge", "config.json"),
         workingDirectory ? node_path_1.default.join(workingDirectory, ".vision-bridge", "config.json") : null,
@@ -81,9 +89,22 @@ function loadConfig(workingDirectory) {
         logFile = node_path_1.default.join(base, ".vision-bridge.log");
     }
     return {
+        mode: toMode(getStr("mode", "VISION_BRIDGE_MODE", "lmstudio")),
+        // Existing LM Studio settings are intentionally unchanged.
         apiRoot: getStr("apiRoot", "VISION_BRIDGE_API_ROOT", "http://127.0.0.1:1238").replace(/\/+$/, ""),
         apiKey: getStr("apiKey", "VISION_BRIDGE_API_KEY", "lm-studio"),
         model: getStr("model", "VISION_BRIDGE_MODEL", "qwen/qwen3.8-27b"),
+        // Separate OpenAI-proxy upstream. Both "http://host:port" and
+        // "http://host:port/v1" are accepted by the proxy.
+        openAiApiRoot: getStr("openAiApiRoot", "VISION_BRIDGE_OPENAI_API_ROOT", "http://127.0.0.1:8080/v1").replace(/\/+$/, ""),
+        openAiApiKey: getStr("openAiApiKey", "VISION_BRIDGE_OPENAI_API_KEY", ""),
+        openAiModel: getStr("openAiModel", "VISION_BRIDGE_OPENAI_MODEL", ""),
+        // 19281 is intentionally adjacent to the GUI's private 19280 port, while
+        // staying far away from common AI ports such as 1234/3000/5000/7860/8000/8080.
+        proxyHost: getStr("proxyHost", "VISION_BRIDGE_PROXY_HOST", "0.0.0.0"),
+        proxyPort: getPositiveNum("proxyPort", "VISION_BRIDGE_PROXY_PORT", 19281),
+        proxyApiKey: getStr("proxyApiKey", "VISION_BRIDGE_PROXY_API_KEY", "vision-bridge"),
+        proxyWorkingDirectory: getStr("proxyWorkingDirectory", "VISION_BRIDGE_PROXY_WORKING_DIRECTORY", ""),
         // 0 = no absolute timeout. This avoids killing legitimate long reasoning
         // runs; the GUI/runtime telemetry makes the wait observable and abortable.
         timeoutMs: getNonNegativeNum("timeoutMs", "VISION_BRIDGE_TIMEOUT_MS", 0),

@@ -132,13 +132,11 @@ reasoning本文は可視化しない。`reasoning_content` / `reasoning` / `reas
 
 ## Security guard
 
-Vision Bridgeはスクリーンショットをdata URLとして送るため、`apiRoot` はloopback hostだけ許可する。
+LM Studio Generator adapterは従来通り`apiRoot`をloopback hostだけに制限する。これは既存挙動を壊さない安全策。
 
-- localhost
-- 127.x.x.x
-- ::1
+OpenAI-compatible Proxy adapterは汎用Upstreamを目的とするため非loopbackも許可する。外部Upstreamを設定した場合は注入画像もそのUpstreamへ送信される。
 
-非loopback endpointは `api_non_loopback` で拒否する。GUI serverも127.0.0.1のみbind。
+GUI serverは127.0.0.1:19280のみ。Proxy outputはDocker接続のため既定0.0.0.0:19281、Bearer key既定`vision-bridge`。
 
 ## Correctness fixes (2026-08-25)
 
@@ -146,3 +144,23 @@ Vision Bridgeはスクリーンショットをdata URLとして送るため、`a
 - dedup hash cacheを廃止: path+size同一でも内容が変われば必ず再hash
 - 既存OpenAI `image_url` user partをhistory変換で保持
 - wire message `content` 型からnullを排除
+
+
+## OpenAI-compatible Proxy adapter (2026-08-27)
+
+既存LM Studio Generatorを置換せず、同じVision Bridge coreへ2つ目のadapterを追加した。
+
+```text
+LM Studio Chat -> Generator adapter -> LM Studio Local API
+                                  \-> shared Vision injection core
+Open WebUI -> OpenAI proxy adapter -> arbitrary OpenAI-compatible upstream
+```
+
+Proxy adapterの重要条件:
+
+- incoming OpenAI messagesは再変換しない。元objectを保持し、synthetic user vision messageだけを挿入する。
+- Upstream rootは`...:port` / `...:port/v1`を正規化する。
+- outputは`GET /v1/models`と`POST /v1/chat/completions`。
+- streaming SSEは内容を書き換えずforwardし、横でreasoning/content/tool activityだけ観測する。
+- mode切替時にGUI processが`lms dev`とProxy childを排他的に管理する。
+- LM Studio/OpenAIそれぞれのUpstream設定を別キーにして、mode切替で既存設定を壊さない。

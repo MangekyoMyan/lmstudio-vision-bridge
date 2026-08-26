@@ -316,6 +316,7 @@ async function generate(ctl, chat) {
         startedAt: Date.now(),
         model: cfg.model,
         apiRoot: cfg.apiRoot,
+        transportMode: "lmstudio",
         timeoutMs: cfg.timeoutMs,
         workingDirectory: wd,
         logFile: cfg.logFile,

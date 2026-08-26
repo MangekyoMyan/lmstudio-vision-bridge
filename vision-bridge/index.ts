@@ -22,7 +22,7 @@ export { main, generate } from "./src/index.js";
 
 // Named exports (used by the test harness and for programmatic reuse).
 export { VisionBridgeGenerator } from "./src/generator.js";
-export { applyVisionBridge } from "./src/vision-bridge.js";
+export { applyVisionBridge, applyVisionBridgeToOpenAI } from "./src/vision-bridge.js";
 export { SeenTracker } from "./src/dedup.js";
 export { extractImageRefs, extractFilePartRefs, resolveImages, refsFromToolResult, messageText } from "./src/image-detect.js";
 export { toOpenAIMessage, toOpenAITools, fileToDataUrl, normalizeToolCallAny, extractAssistantToolCalls, guessMime, normalizeOpenAIMessage, normalizeOpenAIMessages, describeMessageShape } from "./src/messages.js";

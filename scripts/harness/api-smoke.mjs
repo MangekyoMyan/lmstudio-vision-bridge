@@ -7,16 +7,17 @@
 
 const root = (process.env.VISION_BRIDGE_API_ROOT || "http://127.0.0.1:1238").replace(/\/+$/, "");
 const key = process.env.VISION_BRIDGE_API_KEY || "lm-studio";
+const modelsUrl = /\/v1$/i.test(root) ? `${root}/models` : `${root}/v1/models`;
 
 async function main() {
   let res;
   try {
-    res = await fetch(`${root}/v1/models`, {
+    res = await fetch(modelsUrl, {
       headers: { authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(5000),
     });
   } catch (e) {
-    console.error(`FAIL cannot reach ${root}/v1/models — ${e.message}`);
+    console.error(`FAIL cannot reach ${modelsUrl} — ${e.message}`);
     console.error("Hint: enable the LM Studio local server (default http://127.0.0.1:1238),");
     console.error("      or set VISION_BRIDGE_API_ROOT to the right endpoint.");
     process.exit(1);
@@ -24,7 +25,7 @@ async function main() {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    console.error(`FAIL ${root}/v1/models returned HTTP ${res.status}: ${text.slice(0, 300)}`);
+    console.error(`FAIL ${modelsUrl} returned HTTP ${res.status}: ${text.slice(0, 300)}`);
     process.exit(1);
   }
 

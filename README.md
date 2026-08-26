@@ -1,14 +1,20 @@
-# Vision Bridge for LM Studio
+# Vision Bridge
 
 > [!IMPORTANT]
 > AI Agent: このプロジェクトを修正する場合は、コードを触る前に `AI_STATUS.md` と `AI_README.md` を読んでください。
 
-LM Studioで、MCPツールが返した画像をVisionモデルへ自動で渡すためのGenerator Pluginです。
+MCPツールが返した画像をVisionモデルへ確実に渡すためのBridgeです。
 
-> [!WARNING]
-> LM Studio側で「MCP画像が保存されるが、モデルのVision入力には渡らない」という問題を回避するための暫定ツールです。LM Studio本体で同等機能が実装された場合、このBridgeは不要になる可能性があります。
+現在は2つの使い方に対応しています。
 
-## 何をするもの？
+1. **LM Studio Generator mode** — 従来のLM Studio Generator Pluginとして使用
+2. **OpenAI-compatible Proxy mode** — Open WebUI等とOpenAI互換モデルAPIの間に挟んで使用
+
+既存のLM Studio経路は残したまま、OpenAI互換Proxyを追加しています。
+
+## 仕組み
+
+### LM Studio Generator
 
 ```text
 Model
@@ -17,62 +23,79 @@ LM Studio → MCP (Blender等)
   ↓
 スクリーンショット保存
   ↓
-Vision Bridge
+Vision Bridge Generator
   ↓ image_url として内部履歴へ注入
 LM Studio Local API → Model Vision
 ```
 
-MCPの実行はLM Studioに任せたままです。Vision Bridgeは「MCPの画像」と「モデルの目」をつなぐだけです。
+MCPの実行はLM Studioが担当します。Vision BridgeはMCP tool result内の画像参照を見つけ、モデルへ渡す内部コピーにだけVision messageを追加します。
+
+### OpenAI-compatible Proxy
+
+```text
+Open WebUI / other OpenAI client
+        ↓
+Vision Bridge
+http://host.docker.internal:19281/v1
+        ↓
+OpenAI-compatible model API
+例: http://127.0.0.1:8080/v1
+```
+
+`GET /v1/models` と `POST /v1/chat/completions` に対応します。ストリーミング応答はできるだけそのまま中継します。
 
 ## GUI Control Panel
 
-長い推論で「まだ考えているのか、エラーで止まったのか」が分かりにくかったため、ローカルGUIを追加しています。
+Control Panelは既定で:
+
+```text
+http://127.0.0.1:19280/
+```
+
+に起動します。
 
 表示できるもの:
 
-- `CONNECTING / CONNECTED / REASONING / GENERATING / TOOL CALL / ERROR` などの現在状態
+- `CONNECTING / CONNECTED / REASONING / GENERATING / TOOL CALL / ERROR` などの状態
 - 経過時間
 - Bridge heartbeat
-- 最後にモデル側のストリーム活動があった時刻
-- reasoning stream の**活動有無・イベント数**（思考本文は表示しません）
+- Last model activity
+- reasoning streamの活動有無・イベント数（思考本文は表示しません）
 - Visionへ投入した画像
-- Bridgeログ / `lms dev` ログ
-- 現在のモデル / API / timeout
+- Bridge / `lms dev` / OpenAI proxy のログ
+- 現在のMode / Model / Upstream API / timeout
 - GUIからの手動Abort
-- Seen-image（重複排除）状態のリセット
-- モデルID・APIポート等の設定
+- Seen-image重複排除状態のリセット
+- LM Studio / OpenAI互換Proxy両方の設定
 
 > [!NOTE]
-> LM Studio/モデルが長考中に一切ストリームイベントを送らない場合、Bridge側から「モデル内部で正常に思考中」か「LM Studio内部で待機中」かを完全には判別できません。その場合でも、**Bridge processのheartbeatが生きているか / HTTP接続済みか / 最後のモデル活動はいつか**を分けて表示します。
+> モデルが内部で思考していてもAPIへreasoningイベントを出さない区間はあります。Reasoning activityが増えている場合はモデル側の活動を確実に観測できていますが、増えていないことだけでは停止とは断定できません。
 
 ## 必要なもの
 
-- Generator Pluginに対応したLM Studio
+共通:
+
 - Vision入力に対応したモデル
-- 使用したいMCPサーバー
-- LM Studio Local Server
+- 使用したいMCP環境
 - Node.js 20.6+
+
+LM Studio modeのみ:
+
+- Generator Plugin対応のLM Studio
 - LM Studio CLI (`lms`)
-
-作者環境の既定値:
-
-| 項目 | 既定値 |
-|---|---|
-| Model | `qwen/qwen3.8-27b` |
-| Local API | `http://127.0.0.1:1238` |
-| Absolute timeout | `0`（無効） |
+- LM Studio Local Server
 
 ## Windows クイックスタート
 
-### 1. 依存関係をインストール
+### 1. 最初の1回だけ依存関係をインストール
 
-最初の1回だけ、`vision-bridge` フォルダで:
+`vision-bridge` フォルダで:
 
 ```cmd
 npm ci
 ```
 
-### 2. GUIから起動
+### 2. GUIを起動
 
 リポジトリ直下の:
 
@@ -82,62 +105,152 @@ start-vision-bridge-gui.cmd
 
 をダブルクリックします。
 
-これで:
+Control Panelで **Mode** を選択します。
 
-1. Vision Bridge Control Panelを `127.0.0.1:19280` で起動
-2. ブラウザでGUIを開く
-3. `vision-bridge` フォルダ内で `lms dev` を起動
+- `LM Studio Generator`
+- `OpenAI-compatible Proxy`
 
-まで行います。
+設定を保存すると、そのModeに必要なプロセスへ自動で切り替わります。
+
+- LM Studio mode → `lms dev` を起動
+- OpenAI mode → OpenAI-compatible proxyを起動
 
 GUIを閉じるだけではNodeプロセスが残る場合があります。起動したコンソールを閉じるか `Ctrl+C` で終了してください。
 
-### 手動起動
+## LM Studio Generator mode
 
-```cmd
-cd /d <ダウンロードしたフォルダ>\vision-bridge
-npm run gui:dev
+GUIで:
+
+```text
+Mode: LM Studio Generator
+Model ID: qwen/qwen3.8-27b
+LM Studio model API: http://127.0.0.1:1238
+API key: lm-studio
 ```
 
-GUIなしで従来通り使う場合:
+など、自分の環境に合わせます。
 
-```cmd
-cd /d <ダウンロードしたフォルダ>\vision-bridge
-lms dev
+`apiRoot` は次のどちらでも使えます。
+
+```text
+http://127.0.0.1:1238
+http://127.0.0.1:1238/v1
 ```
 
-## LM Studio側
+LM Studio側では:
 
 1. Vision対応モデルをロード
 2. Local Serverを有効化
-3. 使用するMCPを通常通り有効化
-4. 対象チャットでGeneratorとして `Vision Bridge` を選択
+3. MCPを通常通り有効化
+4. チャットでGeneratorとしてVision Bridgeを選択
 
-`lms dev` が動いている間、通常通りLM StudioからMCPを使います。
+既存のGenerator経路・MCP tool-call転送は変更していません。
 
-## 設定
+## OpenAI-compatible Proxy mode
 
-一番簡単なのはGUIの **Settings** から変更する方法です。設定は:
+GUIで **Mode = OpenAI-compatible Proxy** を選びます。
+
+### Upstream model API
+
+実際にモデルを提供しているOpenAI互換APIを指定します。
+
+例:
+
+```text
+http://127.0.0.1:8080/v1
+```
+
+または環境によって:
+
+```text
+http://host.docker.internal:8080/v1
+```
+
+`/v1`付き・なし両方に対応します。
+
+**Model override**:
+
+- 空欄 → Open WebUI等のクライアントが送った `model` をそのまま使用
+- 値あり → 常にそのモデルIDへ置換
+
+### Vision Bridge output API
+
+既定値:
+
+```text
+Port: 19281
+Listen: 0.0.0.0
+API key: vision-bridge
+```
+
+Docker内のOpen WebUIから接続する場合:
+
+```text
+URL:     http://host.docker.internal:19281/v1
+API key: vision-bridge
+```
+
+Windowsホスト上のクライアントから接続する場合:
+
+```text
+URL:     http://127.0.0.1:19281/v1
+API key: vision-bridge
+```
+
+`19281` はGUIの `19280` と並べつつ、AI/開発環境でよく使われる `1234 / 3000 / 5000 / 7860 / 8000 / 8080` 等を避けるための既定値です。GUIから変更できます。
+
+### Image working directory
+
+OpenAI proxy経路ではLM Studio Controllerからworking directoryを取得できません。
+
+tool resultが:
+
+```text
+fileName: scene.png
+```
+
+のような**相対パス**だけを返す場合、GUIの `Image working directory` にその画像が保存されるホスト側ディレクトリを指定してください。
+
+絶対パスの場合は通常不要です。
+
+## 設定ファイル
+
+GUI設定は:
 
 ```text
 C:\Users\<ユーザー名>\.vision-bridge\config.json
 ```
 
-へ保存されます。
+に保存されます。
 
-手書きする場合:
+主なキー:
 
 ```json
 {
+  "mode": "lmstudio",
+
   "apiRoot": "http://127.0.0.1:1238",
+  "apiKey": "lm-studio",
   "model": "qwen/qwen3.8-27b",
+
+  "openAiApiRoot": "http://127.0.0.1:8080/v1",
+  "openAiApiKey": "",
+  "openAiModel": "",
+
+  "proxyHost": "0.0.0.0",
+  "proxyPort": 19281,
+  "proxyApiKey": "vision-bridge",
+  "proxyWorkingDirectory": "",
+
   "timeoutMs": 0,
   "bridgeEnabled": true,
   "requoteOriginalRequest": true
 }
 ```
 
-設定の優先順位は:
+LM Studio用設定とOpenAI proxy用設定は**別々に保存**されるため、Modeを切り替えても接続先を上書きしません。
+
+設定の優先順位:
 
 ```text
 環境変数
@@ -146,12 +259,7 @@ C:\Users\<ユーザー名>\.vision-bridge\config.json
 > 既定値
 ```
 
-です。
-
-> [!NOTE]
-> 以前は実装上のマージ順が逆で、ユーザー側configがworking directory側を上書きしていました。現在は上記の優先順位どおりに修正済みです。
-
-### Timeout
+## Timeout / Abort
 
 `timeoutMs`:
 
@@ -159,96 +267,81 @@ C:\Users\<ユーザー名>\.vision-bridge\config.json
 - `300000` = 5分
 - `600000` = 10分
 
-長考を正常に許容するため既定は無制限です。必要ならGUIの **Abort current request** でいつでも停止できます。
+長考を誤って殺さないため既定は無制限です。GUIの **Abort current request** はLM Studio / OpenAI Proxy両方で使用できます。
 
 ## GUIの状態表示
-
-主な状態:
 
 | 状態 | 意味 |
 |---|---|
 | `PREPARING` | 履歴変換 / Vision画像検出中 |
-| `CONNECTING` | LM Studio Local APIへPOST中 |
+| `CONNECTING` | Upstream model APIへ接続中 |
 | `CONNECTED` | HTTP接続済み、モデルストリーム待ち |
 | `REASONING` | reasoning系ストリーム活動を検出 |
 | `GENERATING` | 通常テキストを生成中 |
-| `TOOL CALL` | tool callを生成/転送中 |
+| `TOOL CALL` | tool callを生成/中継中 |
 | `COMPLETED` | 正常終了 |
-| `ABORTED` | GUI / LM Studio側から中断 |
+| `ABORTED` | GUI / client側から中断 |
 | `ERROR` | API/Bridgeエラー |
-
-`Bridge heartbeat` が数秒以内で更新され続けているなら、少なくともVision BridgeのNode処理自体は生存しています。
 
 ## Vision画像の重複排除
 
-画像内容のSHA-256で重複を判定します。
+画像内容のSHA-256で判定します。
 
 - 同じファイル名でも内容が変われば再投入
 - 同じ内容ならスキップ
-- GUIの **Reset seen images** で現在のworking directoryの記録を消去可能
+- GUIの **Reset seen images** からリセット可能
 
-同一パス・同一ファイルサイズで中身だけ変化したケースでも誤判定しないよう、現在は毎回実ファイル内容をhashします。
-
-## 対応する画像
-
-想定するMCP:
-
-1. 画像をLM Studioのworking directoryへ保存
-2. tool result内に画像ファイルへの参照を返す
-
-Blender MCPで動作確認済みです。
-
-MCPが画像をファイル化せず、インラインBase64だけをtool resultとして返すケースは現状の自動検出対象外です。
-
-| 項目 | 制限 |
-|---|---|
-| 1回の画像数 | 最大8画像 |
-| 1画像サイズ | 最大20MB |
-| 重複判定 | SHA-256 |
+OpenAI Proxy modeではproxy専用のSeen stateを使い、LM Studio modeのworking-directory stateとは分けています。
 
 ## セキュリティ
 
-Vision Bridgeはスクリーンショットをdata URL化して送信するため、API先は**loopback限定**です。
+### LM Studio mode
 
-許可:
+従来通り、スクリーンショット誤送信防止のためモデルAPIはloopback限定です。
 
 - `localhost`
 - `127.x.x.x`
 - `::1`
 
-誤設定で画像を外部APIへ送らないよう、非loopbackの `apiRoot` は拒否します。
+### OpenAI Proxy mode
 
-GUI自体も `127.0.0.1` のみにbindします。
+OpenAI互換APIを汎用的に扱うため、**Upstream model APIはloopback限定ではありません**。
+
+したがって外部URLを指定すると、Vision Bridgeが挿入した画像もそのUpstreamへ送信されます。信頼できるモデルAPIだけを設定してください。
+
+Proxy outputはDocker内Open WebUIから使えるよう既定で `0.0.0.0:19281` にlistenします。既定API keyは `vision-bridge` です。Dockerからの接続が不要ならGUIでlisten hostを `127.0.0.1` に変更できます。
+
+GUI本体は従来通り `127.0.0.1:19280` のみです。
 
 ## うまく動かない場合
 
-### `model not found`
+### LM Studio: model not found
 
-GUIのModel IDとLM Studioでロード中の正確なモデルIDを一致させてください。
-
-モデル一覧確認:
+GUIのModel IDとLM Studioでロード中の正確なモデルIDを合わせてください。
 
 ```cmd
 npm run api:smoke
 ```
 
-### APIへ接続できない
+### Open WebUIから接続できない
 
-LM Studio Local Serverが有効か、GUIのAPIポートが合っているか確認してください。
+まずGUIの `OpenAI proxy` が `running` になっているか確認します。
 
-### 長時間止まって見える
+Docker版Open WebUIでは:
 
-GUIで:
+```text
+http://host.docker.internal:19281/v1
+```
 
-- Bridge heartbeat
-- HTTP接続状態
-- Last model activity
-- reasoning activity
-- Bridge log
+を使います。`proxyHost` が `127.0.0.1` だとDockerからは接続できないため、`0.0.0.0` を選択してください。
 
-を確認してください。
+### `/v1/models` は見えるが生成できない
 
-heartbeatまで止まっていればBridge/Node側の停止を疑えます。heartbeatは動いているがmodel activityだけ長時間無ければ、LM Studio内部待機または無イベント長考の可能性があります。
+GUIの `OpenAI proxy` ログとBridge logを確認してください。Upstream model API、API key、model overrideを確認します。
+
+### 相対画像パスを見つけられない
+
+OpenAI Proxy modeの `Image working directory` を設定してください。
 
 ## 開発・テスト
 
@@ -261,9 +354,20 @@ npm run phase1:text -- --mock
 npm run phase1:vision -- --mock
 npm run phase1:sdkchat
 npm run phase4:control
+npm run phase5:proxy
 ```
 
-`phase4:control` は、無制限timeout・reasoning activity検出・GUI型Abortの経路をモックAPIで検証します。
+`phase5:proxy` は:
+
+- OpenAI Proxy起動
+- output API key
+- `/v1/models`
+- streaming `/v1/chat/completions`
+- `/v1`付きUpstream URL
+- model override
+- MCP tool-result画像のVision注入
+
+をモックUpstreamで検証します。
 
 詳細:
 

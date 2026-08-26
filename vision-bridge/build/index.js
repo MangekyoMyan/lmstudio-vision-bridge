@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.reportToolCall = exports.getModelInfo = exports.getControllerTools = exports.getWorkingDirectory = exports.chatCompletionStream = exports.log = exports.configureLog = exports.loadConfig = exports.describeMessageShape = exports.normalizeOpenAIMessages = exports.normalizeOpenAIMessage = exports.guessMime = exports.extractAssistantToolCalls = exports.normalizeToolCallAny = exports.fileToDataUrl = exports.toOpenAITools = exports.toOpenAIMessage = exports.messageText = exports.refsFromToolResult = exports.resolveImages = exports.extractFilePartRefs = exports.extractImageRefs = exports.SeenTracker = exports.applyVisionBridge = exports.VisionBridgeGenerator = exports.generate = exports.main = void 0;
+exports.reportToolCall = exports.getModelInfo = exports.getControllerTools = exports.getWorkingDirectory = exports.chatCompletionStream = exports.log = exports.configureLog = exports.loadConfig = exports.describeMessageShape = exports.normalizeOpenAIMessages = exports.normalizeOpenAIMessage = exports.guessMime = exports.extractAssistantToolCalls = exports.normalizeToolCallAny = exports.fileToDataUrl = exports.toOpenAITools = exports.toOpenAIMessage = exports.messageText = exports.refsFromToolResult = exports.resolveImages = exports.extractFilePartRefs = exports.extractImageRefs = exports.SeenTracker = exports.applyVisionBridgeToOpenAI = exports.applyVisionBridge = exports.VisionBridgeGenerator = exports.generate = exports.main = void 0;
 /**
  * Package entry point (test harness + programmatic reuse).
  *
@@ -27,6 +27,7 @@ var generator_js_2 = require("./src/generator.js");
 Object.defineProperty(exports, "VisionBridgeGenerator", { enumerable: true, get: function () { return generator_js_2.VisionBridgeGenerator; } });
 var vision_bridge_js_1 = require("./src/vision-bridge.js");
 Object.defineProperty(exports, "applyVisionBridge", { enumerable: true, get: function () { return vision_bridge_js_1.applyVisionBridge; } });
+Object.defineProperty(exports, "applyVisionBridgeToOpenAI", { enumerable: true, get: function () { return vision_bridge_js_1.applyVisionBridgeToOpenAI; } });
 var dedup_js_1 = require("./src/dedup.js");
 Object.defineProperty(exports, "SeenTracker", { enumerable: true, get: function () { return dedup_js_1.SeenTracker; } });
 var image_detect_js_1 = require("./src/image-detect.js");

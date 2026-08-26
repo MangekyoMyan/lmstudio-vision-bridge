@@ -29,8 +29,10 @@ export class SeenTracker {
   private byHash = new Map<string, SeenRecord>();
   private stateFile: string | null;
 
-  constructor(workingDirectory: string | null) {
-    this.stateFile = workingDirectory ? path.join(workingDirectory, STATE_DIRNAME, STATE_FILE) : null;
+  constructor(workingDirectory: string | null, stateFileOverride?: string | null) {
+    this.stateFile = stateFileOverride !== undefined
+      ? stateFileOverride
+      : workingDirectory ? path.join(workingDirectory, STATE_DIRNAME, STATE_FILE) : null;
     this.load();
   }
 

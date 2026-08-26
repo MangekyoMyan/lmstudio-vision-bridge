@@ -12,6 +12,7 @@ const appDir = path.join(os.homedir(), ".vision-bridge");
 const configFile = path.join(appDir, "config.json");
 const runtimeFile = path.join(appDir, "runtime.json");
 const controlFile = path.join(appDir, "control.json");
+const proxySeenFile = path.join(appDir, "proxy-seen.json");
 const host = "127.0.0.1";
 const portArg = process.argv.find((a) => a.startsWith("--port="));
 const port = portArg ? Number(portArg.slice(7)) || 19280 : 19280;
@@ -21,17 +22,22 @@ const noOpen = process.argv.includes("--no-open");
 fs.mkdirSync(appDir, { recursive: true });
 
 const devLog = [];
+const proxyLog = [];
 let devProcess = null;
-let devState = withLmsDev ? "starting" : "not-started";
+let proxyProcess = null;
+let devState = withLmsDev ? "not-started" : "not-managed";
+let proxyState = "not-started";
 
-function pushDevLog(source, chunk) {
+function pushLog(target, source, chunk) {
   const text = String(chunk ?? "");
   for (const line of text.split(/\r?\n/)) {
     if (!line) continue;
-    devLog.push(`${new Date().toLocaleTimeString()} [${source}] ${line}`);
+    target.push(`${new Date().toLocaleTimeString()} [${source}] ${line}`);
   }
-  if (devLog.length > 400) devLog.splice(0, devLog.length - 400);
+  if (target.length > 500) target.splice(0, target.length - 500);
 }
+function pushDevLog(source, chunk) { pushLog(devLog, source, chunk); }
+function pushProxyLog(source, chunk) { pushLog(proxyLog, source, chunk); }
 
 function readJson(file, fallback = {}) {
   try {
@@ -40,6 +46,18 @@ function readJson(file, fallback = {}) {
   } catch {
     return fallback;
   }
+}
+
+function effectiveConfig() {
+  const c = readJson(configFile, {});
+  return {
+    ...c,
+    mode: c.mode === "openai" ? "openai" : "lmstudio",
+    proxyHost: typeof c.proxyHost === "string" && c.proxyHost ? c.proxyHost : "0.0.0.0",
+    proxyPort: Number.isFinite(Number(c.proxyPort)) && Number(c.proxyPort) > 0 ? Math.floor(Number(c.proxyPort)) : 19281,
+    proxyApiKey: c.proxyApiKey === undefined ? "vision-bridge" : String(c.proxyApiKey ?? ""),
+    openAiApiRoot: typeof c.openAiApiRoot === "string" && c.openAiApiRoot ? c.openAiApiRoot : "http://127.0.0.1:8080/v1",
+  };
 }
 
 function atomicWrite(file, value) {
@@ -112,9 +130,25 @@ function contentType(file) {
 }
 
 const allowedConfig = new Set([
-  "apiRoot", "apiKey", "model", "timeoutMs", "maxImageBytes", "logLevel",
+  "mode",
+  "apiRoot", "apiKey", "model",
+  "openAiApiRoot", "openAiApiKey", "openAiModel",
+  "proxyHost", "proxyPort", "proxyApiKey", "proxyWorkingDirectory",
+  "timeoutMs", "maxImageBytes", "logLevel",
   "bridgeEnabled", "syntheticText", "requoteOriginalRequest",
 ]);
+
+function proxyInfo() {
+  const c = effectiveConfig();
+  return {
+    state: proxyState,
+    pid: proxyProcess?.pid ?? null,
+    host: c.proxyHost,
+    port: c.proxyPort,
+    windowsUrl: `http://127.0.0.1:${c.proxyPort}/v1`,
+    dockerUrl: `http://host.docker.internal:${c.proxyPort}/v1`,
+  };
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -125,10 +159,16 @@ const server = http.createServer(async (req, res) => {
       const config = readJson(configFile, {});
       return sendJson(res, 200, {
         runtime,
-        config: { ...config, apiKey: config.apiKey ? "••••••••" : "" },
+        config: {
+          ...config,
+          apiKey: config.apiKey ? "••••••••" : "",
+          openAiApiKey: config.openAiApiKey ? "••••••••" : "",
+          proxyApiKey: config.proxyApiKey ? "••••••••" : (config.proxyApiKey === "" ? "" : undefined),
+        },
         configFile,
         runtimeFile,
         dev: { state: devState, pid: devProcess?.pid ?? null },
+        proxy: proxyInfo(),
         now: Date.now(),
       });
     }
@@ -138,9 +178,10 @@ const server = http.createServer(async (req, res) => {
       const current = readJson(configFile, {});
       for (const [key, value] of Object.entries(body)) {
         if (!allowedConfig.has(key)) continue;
-        if (key === "apiKey" && value === "••••••••") continue;
+        if (["apiKey", "openAiApiKey", "proxyApiKey"].includes(key) && value === "••••••••") continue;
         current[key] = value;
       }
+      current.mode = current.mode === "openai" ? "openai" : "lmstudio";
       if (current.timeoutMs !== undefined) {
         const n = Number(current.timeoutMs);
         current.timeoutMs = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
@@ -150,8 +191,13 @@ const server = http.createServer(async (req, res) => {
         if (!Number.isFinite(n) || n <= 0) delete current.maxImageBytes;
         else current.maxImageBytes = Math.floor(n);
       }
+      if (current.proxyPort !== undefined) {
+        const n = Number(current.proxyPort);
+        current.proxyPort = Number.isFinite(n) && n >= 1024 && n <= 65535 ? Math.floor(n) : 19281;
+      }
       atomicWrite(configFile, current);
-      return sendJson(res, 200, { ok: true, configFile });
+      await syncWorkers(true);
+      return sendJson(res, 200, { ok: true, configFile, mode: current.mode, proxy: proxyInfo() });
     }
 
     if (url.pathname === "/api/abort" && req.method === "POST") {
@@ -164,14 +210,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/reset-dedup" && req.method === "POST") {
+      const c = effectiveConfig();
+      if (c.mode === "openai") {
+        try { fs.unlinkSync(proxySeenFile); } catch (e) { if (e?.code !== "ENOENT") throw e; }
+        return sendJson(res, 200, { ok: true, state: proxySeenFile, mode: "openai" });
+      }
       const runtime = readJson(runtimeFile, null);
       const wd = typeof runtime?.workingDirectory === "string" ? runtime.workingDirectory : null;
       if (!wd) return sendJson(res, 409, { ok: false, error: "Working directory is not known yet." });
       const state = path.join(wd, ".vision-bridge", "state.json");
-      try { fs.unlinkSync(state); } catch (e) {
-        if (e?.code !== "ENOENT") throw e;
-      }
-      return sendJson(res, 200, { ok: true, state });
+      try { fs.unlinkSync(state); } catch (e) { if (e?.code !== "ENOENT") throw e; }
+      return sendJson(res, 200, { ok: true, state, mode: "lmstudio" });
     }
 
     if (url.pathname === "/api/log" && req.method === "GET") {
@@ -182,6 +231,10 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/dev-log" && req.method === "GET") {
       return sendJson(res, 200, { state: devState, text: devLog.slice(-250).join("\n") });
+    }
+
+    if (url.pathname === "/api/proxy-log" && req.method === "GET") {
+      return sendJson(res, 200, { state: proxyState, text: proxyLog.slice(-250).join("\n"), ...proxyInfo() });
     }
 
     let requestPath = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -212,31 +265,102 @@ function openBrowser(url) {
 }
 
 function startLmsDev() {
-  if (!withLmsDev) return;
+  if (!withLmsDev || devProcess) return;
   pushDevLog("gui", `starting lms dev in ${pluginDir}`);
-  devProcess = spawn("lms", ["dev"], {
+  const child = spawn("lms", ["dev"], {
     cwd: pluginDir,
     shell: process.platform === "win32",
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  devProcess = child;
   devState = "running";
-  devProcess.stdout?.on("data", (d) => pushDevLog("lms", d));
-  devProcess.stderr?.on("data", (d) => pushDevLog("lms:err", d));
-  devProcess.on("error", (e) => {
+  child.stdout?.on("data", (d) => pushDevLog("lms", d));
+  child.stderr?.on("data", (d) => pushDevLog("lms:err", d));
+  child.on("error", (e) => {
+    if (devProcess !== child) return;
     devState = "error";
     pushDevLog("gui", `failed to start lms dev: ${e.message}`);
   });
-  devProcess.on("exit", (code, signal) => {
+  child.on("exit", (code, signal) => {
+    if (devProcess !== child) return;
+    devProcess = null;
     devState = code === 0 ? "stopped" : "error";
     pushDevLog("gui", `lms dev exited code=${String(code)} signal=${String(signal)}`);
   });
 }
 
-function shutdown() {
-  if (devProcess && !devProcess.killed) {
-    try { devProcess.kill(); } catch {}
+function stopLmsDev(reason = "mode changed") {
+  const child = devProcess;
+  if (!child) {
+    devState = withLmsDev ? "disabled-by-mode" : "not-managed";
+    return;
   }
+  devProcess = null;
+  pushDevLog("gui", `stopping lms dev (${reason})`);
+  try { child.kill(); } catch {}
+  devState = "disabled-by-mode";
+}
+
+function startProxy() {
+  if (proxyProcess) return;
+  const c = effectiveConfig();
+  const proxyScript = path.join(pluginDir, "proxy", "server.mjs");
+  pushProxyLog("gui", `starting proxy ${c.proxyHost}:${c.proxyPort} -> ${c.openAiApiRoot}`);
+  const child = spawn(process.execPath, [proxyScript, `--host=${c.proxyHost}`, `--port=${c.proxyPort}`], {
+    cwd: pluginDir,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  proxyProcess = child;
+  proxyState = "running";
+  child.stdout?.on("data", (d) => pushProxyLog("proxy", d));
+  child.stderr?.on("data", (d) => pushProxyLog("proxy:err", d));
+  child.on("error", (e) => {
+    if (proxyProcess !== child) return;
+    proxyState = "error";
+    pushProxyLog("gui", `failed to start proxy: ${e.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    if (proxyProcess !== child) return;
+    proxyProcess = null;
+    proxyState = code === 0 ? "stopped" : "error";
+    pushProxyLog("gui", `proxy exited code=${String(code)} signal=${String(signal)}`);
+  });
+}
+
+function stopProxy(reason = "mode changed") {
+  const child = proxyProcess;
+  if (!child) {
+    proxyState = "disabled-by-mode";
+    return;
+  }
+  proxyProcess = null;
+  pushProxyLog("gui", `stopping proxy (${reason})`);
+  try { child.kill(); } catch {}
+  proxyState = "disabled-by-mode";
+}
+
+async function syncWorkers(forceRestartProxy = false) {
+  const c = effectiveConfig();
+  if (c.mode === "openai") {
+    stopLmsDev("OpenAI-compatible mode selected");
+    if (forceRestartProxy && proxyProcess) {
+      stopProxy("settings changed");
+      // Give Windows a moment to release the listen socket before rebinding.
+      await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+    startProxy();
+  } else {
+    stopProxy("LM Studio mode selected");
+    if (withLmsDev) startLmsDev();
+    else devState = "not-managed";
+  }
+}
+
+function shutdown() {
+  if (devProcess && !devProcess.killed) { try { devProcess.kill(); } catch {} }
+  if (proxyProcess && !proxyProcess.killed) { try { proxyProcess.kill(); } catch {} }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
 }
@@ -247,6 +371,6 @@ server.listen(port, host, () => {
   const url = `http://${host}:${port}/`;
   console.log(`[Vision Bridge GUI] ${url}`);
   console.log(`[Vision Bridge GUI] config: ${configFile}`);
-  startLmsDev();
+  syncWorkers(false).catch((e) => console.error(`[Vision Bridge GUI] worker sync failed: ${e.message}`));
   openBrowser(url);
 });

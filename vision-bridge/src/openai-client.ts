@@ -13,6 +13,13 @@ import { dbg, err, info, warn } from "./log.js";
 import { describeMessageShape, normalizeOpenAIMessages, normalizeToolCallAny } from "./messages.js";
 import { BridgeError, type OpenAIToolCall, type OpenAIToolDef } from "./types.js";
 
+
+export function openAiEndpoint(apiRoot: string, route: string): string {
+  const base = apiRoot.replace(/\/+$/, "");
+  const normalizedRoute = route.startsWith("/") ? route : `/${route}`;
+  return /\/v1$/i.test(base) ? `${base}${normalizedRoute}` : `${base}/v1${normalizedRoute}`;
+}
+
 export interface ChatRequest {
   model: string;
   messages: unknown[];
@@ -217,7 +224,7 @@ export async function chatCompletionStream(
   options: { signal?: AbortSignal; observer?: ChatStreamObserver } = {}
 ): Promise<ChatResult> {
   assertLoopbackApiRoot(cfg.apiRoot);
-  const url = `${cfg.apiRoot.replace(/\/+$/, "")}/v1/chat/completions`;
+  const url = openAiEndpoint(cfg.apiRoot, "/chat/completions");
 
   const incoming = Array.isArray(req.messages) ? (req.messages as unknown[]) : [];
   info("api", "outgoing message shapes (pre-send)", {

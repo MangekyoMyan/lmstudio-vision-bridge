@@ -253,7 +253,7 @@ npm run phase3:bridge
 - 本プロジェクトの独自コードには LICENSE ファイルを付けていません。
   第三者への利用許諾は、譲渡時の合意（口頭でも可）に基づきます。
   同梱の依存パッケージ（`@lmstudio/sdk` 等）は各自のライセンス（Apache-2.0 等）に従います。
-- セキュリティ面: 推論APIは loopback (`localhost` / `127.x.x.x` / `::1`) のみ許可。GUIも `127.0.0.1` のみにbind。
+- セキュリティ面: **LM Studio Generator側**の推論APIは loopback (`localhost` / `127.x.x.x` / `::1`) のみ許可。OpenAI Proxy modeは任意Upstreamを許可するため、外部URL指定時は画像送信先になる。GUIは `127.0.0.1:19280`、Proxy outputは既定 `0.0.0.0:19281`。
   外部送信・UI自動操作・MCPクライアント実装は行いません（詳細は `docs/architecture.md`）。
 
 ## 最大の未確認事項とフォールバック
@@ -286,3 +286,24 @@ npm run phase3:bridge
 - LM Studio内部ファイルの直接改造
 - tool resultの型制約を破って画像を直接付加する方式
 - 巨大フレームワークの導入
+
+
+## OpenAI-compatible Proxy mode (2026-08-27)
+
+GUIの`Mode`で既存`LM Studio Generator`と`OpenAI-compatible Proxy`を切り替えられる。既定は`lmstudio`で既存動作を維持。
+
+Proxy modeの設定キー:
+
+| key | default | meaning |
+|---|---|---|
+| `openAiApiRoot` | `http://127.0.0.1:8080/v1` | 実モデルのOpenAI互換API |
+| `openAiApiKey` | empty | Upstream Bearer key |
+| `openAiModel` | empty | empty=client modelを保持、値あり=Upstream modelを強制 |
+| `proxyHost` | `0.0.0.0` | output listen host。Docker対応 |
+| `proxyPort` | `19281` | output port |
+| `proxyApiKey` | `vision-bridge` | clientからBridgeへのBearer key |
+| `proxyWorkingDirectory` | empty | relative tool-image path解決用 |
+
+Open WebUI(Docker)側は通常 `http://host.docker.internal:19281/v1` を設定する。`/v1/models`と`/v1/chat/completions`に対応。
+
+実装: `vision-bridge/proxy/server.mjs`。OpenAI requestの既存message objectは保持し、`applyVisionBridgeToOpenAI()`が必要なsynthetic Vision messageだけ追加する。

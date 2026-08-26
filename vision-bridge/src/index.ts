@@ -325,6 +325,7 @@ export async function generate(ctl: unknown, chat: unknown): Promise<void> {
     startedAt: Date.now(),
     model: cfg.model,
     apiRoot: cfg.apiRoot,
+    transportMode: "lmstudio",
     timeoutMs: cfg.timeoutMs,
     workingDirectory: wd,
     logFile: cfg.logFile,

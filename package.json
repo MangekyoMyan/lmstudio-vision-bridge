@@ -2,7 +2,7 @@
   "name": "mcp-vision-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "Vision Bridge for LM Studio: feeds MCP tool-result images into the loaded model's vision input via a Generator plugin (loopback OpenAI-compatible API).",
+  "description": "MCP Vision Bridge with LM Studio Generator and OpenAI-compatible proxy modes.",
   "type": "module",
   "scripts": {
     "build": "npm --prefix vision-bridge run build",
@@ -16,6 +16,8 @@
     "gui": "node vision-bridge/gui/server.mjs",
     "gui:dev": "node vision-bridge/gui/server.mjs --with-lms-dev",
     "phase4:control": "node scripts/harness/phase4-control-test.mjs",
-    "phase0:config": "node scripts/harness/config-priority-test.mjs"
+    "phase0:config": "node scripts/harness/config-priority-test.mjs",
+    "proxy": "node vision-bridge/proxy/server.mjs",
+    "phase5:proxy": "node scripts/harness/phase5-proxy-test.mjs"
   }
 }
